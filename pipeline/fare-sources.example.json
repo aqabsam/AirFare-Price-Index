@@ -1,0 +1,111 @@
+{
+  "sources": [
+    {
+      "id": "indigo",
+      "name": "IndiGo Flight Booking",
+      "type": "web",
+      "sourceType": "airline",
+      "url": "https://www.goindigo.in/flights",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45],
+      "routes": [
+        { "origin": "PAT", "destination": "BOM" },
+        { "origin": "DEL", "destination": "BLR" }
+      ]
+    },
+    {
+      "id": "air_india",
+      "name": "Air India Flight Booking",
+      "type": "web",
+      "sourceType": "airline",
+      "url": "https://www.airindia.com/en/book-flights/",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45],
+      "routes": [
+        { "origin": "PAT", "destination": "BOM" },
+        { "origin": "DEL", "destination": "BLR" }
+      ]
+    },
+    {
+      "id": "air_india_express",
+      "name": "Air India Express Booking",
+      "type": "web",
+      "sourceType": "airline",
+      "url": "https://flights.airindiaexpress.com/en/",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "akasa",
+      "name": "Akasa Air Flight Booking",
+      "type": "web",
+      "sourceType": "airline",
+      "url": "https://www.akasaair.com/flight-booking",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "spicejet",
+      "name": "SpiceJet Flight Booking",
+      "type": "web",
+      "sourceType": "airline",
+      "url": "https://www.spicejet.com/",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "makemytrip",
+      "name": "MakeMyTrip Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.makemytrip.com/flights/",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "yatra",
+      "name": "Yatra Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.yatra.com/flights",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "easemytrip",
+      "name": "EaseMyTrip Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.easemytrip.com/flights.html",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "cleartrip",
+      "name": "Cleartrip Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.cleartrip.com/flights",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "ixigo",
+      "name": "ixigo Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.ixigo.com/flights",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    },
+    {
+      "id": "goibibo",
+      "name": "Goibibo Flights",
+      "type": "web",
+      "sourceType": "ota",
+      "url": "https://www.goibibo.com/flights/",
+      "enabled": true,
+      "bookingWindows": [1, 7, 15, 30, 45]
+    }
+  ]
+}
