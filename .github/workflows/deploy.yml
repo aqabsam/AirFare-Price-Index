@@ -1,7 +1,6 @@
-cat > .github/workflows/deploy.yml <<'EOF'
 name: Deploy React App
 
-on:
+"on":
   push:
     branches:
       - main
@@ -14,7 +13,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,14 +41,12 @@ jobs:
           path: frontend/dist
 
   deploy:
+    needs: build
+    runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    needs: build
-    runs-on: ubuntu-latest
-
     steps:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
-EOF
