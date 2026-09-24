@@ -16,11 +16,16 @@ export type NormalizedFlightOffer = {
   duration: string
   stops: number
   price: number
+  baseFare?: number | null
+  taxes?: number | null
+  udf?: number | null
+  convenienceFee?: number | null
+  totalFare?: number | null
   currency: string
   offerId: string
   seatsRemaining: number
   source: string
-  sourceType: 'airline' | 'ota' | 'aggregated'
+  sourceType: 'airline' | 'ota' | 'duffel' | 'demo' | 'aggregated'
   collectedAt: string
   confidence: number
 }

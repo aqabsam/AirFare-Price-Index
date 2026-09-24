@@ -45,10 +45,15 @@ export async function flightsRoutes(fastify: FastifyInstance) {
 
     try {
       const offers = await searchFlights(parsed.data)
-      return reply.send({ offers })
+      return reply.send({
+        offers,
+        ...(offers.length ? {} : { message: 'No verified flights available for this search.' }),
+      })
     } catch (error) {
       request.log.error({ error }, 'Unexpected flight search failure')
-      return reply.status(500).send({ error: 'Unable to search flights right now' })
+      return reply.status(503).send({
+        error: error instanceof Error ? error.message : 'No live flight provider is available',
+      })
     }
   })
 }

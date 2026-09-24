@@ -1,4 +1,4 @@
-import { loadFareSourceConfigs } from '../config/fareSources.js'
+import { loadWebsiteScrapers } from '../scrapers/index.js'
 import { fareStore } from './fareStore.js'
 import type { FareSourceHealth, FareSourceHealthResponse } from '../types/fare.js'
 
@@ -42,7 +42,7 @@ function deriveStatus(lastCollectedAt: string | null): FareSourceHealth['status'
 }
 
 export async function calculateFareSourceHealth(): Promise<FareSourceHealthResponse> {
-  const configs = await loadFareSourceConfigs()
+  const configs = loadWebsiteScrapers().map((scraper) => scraper.definition)
   const snapshots = fareStore.getSnapshots()
 
   const sources: FareSourceHealth[] = configs.map((source) => {
@@ -55,13 +55,13 @@ export async function calculateFareSourceHealth(): Promise<FareSourceHealthRespo
     const lastCollectedAt = latestSnapshotTimestamp(matchingSnapshots)
 
     return {
-      id: source.id ?? normalizeKey(source.name),
+      id: source.id,
       name: source.name,
       sourceType: source.sourceType,
-      kind: source.kind ?? 'page',
+      kind: 'page',
       url: source.url ?? '',
-      routeCount: source.routes?.length ?? 0,
-      bookingWindows: source.bookingWindows ?? [],
+      routeCount: 0,
+      bookingWindows: [],
       snapshotCount: matchingSnapshots.length,
       lastCollectedAt,
       status: deriveStatus(lastCollectedAt),

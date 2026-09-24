@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { collectAndStoreFareSnapshots, getFareCollectionStatus } from '../services/fareCollectionService.js'
 import { calculateFareSourceHealth } from '../services/fareSourceHealthService.js'
 import { fareStore } from '../services/fareStore.js'
+import { getCollectionLogs } from '../services/collectionLogService.js'
 
 export async function adminRoutes(fastify: FastifyInstance) {
   fastify.get('/api/admin/fare-collection/status', async () => {
@@ -35,6 +36,8 @@ export async function adminRoutes(fastify: FastifyInstance) {
       snapshots: fareStore.getSnapshots(),
     }
   })
+
+  fastify.get('/api/admin/fare-collection/logs', async () => ({ logs: getCollectionLogs() }))
 
   fastify.get('/api/admin/fare-sources/status', async () => {
     return calculateFareSourceHealth()

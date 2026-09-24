@@ -1,596 +1,248 @@
-import { chromium } from 'playwright'
-import {
-  loadFareSourceConfigs,
-  renderFareSourceTemplate,
-  type FareSourceConfig,
-  type FareSourceRoute,
-} from '../config/fareSources.js'
-import { loadTrackedRoutes } from '../data/trackedRoutes.js'
+import { chromium, type Browser } from 'playwright'
+import { loadTrackedRoutes, type TrackedRoute } from '../data/trackedRoutes.js'
 import type { FareSnapshot } from '../types/fare.js'
+import type { FlightSearchRequest } from '../types/flight.js'
+import { loadWebsiteScrapers } from '../scrapers/index.js'
+import { searchDuffelOffers } from '../providers/duffel.js'
+import { DEFAULT_FARE_SNAPSHOTS } from '../data/fareCatalog.js'
+import type { NormalizedFlightOffer } from '../types/flight.js'
 
-const DEFAULT_BOOKING_WINDOWS = [1, 7, 15, 30, 45]
+const MAX_CONCURRENT = Math.max(1, Math.min(4, Number(process.env.SCRAPER_MAX_CONCURRENT ?? '2')))
+const SCRAPE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPER_TIMEOUT ?? '30000'))
+const CACHE_TTL_MS = Math.max(0, Number(process.env.SCRAPER_CACHE_TTL ?? '300')) * 1_000
 const IST_TIME_ZONE = 'Asia/Kolkata'
+export const ADVANCE_WINDOWS = [1, 7, 15, 30, 45] as const
 
-type ExtractedSnapshot = Partial<FareSnapshot> & {
-  id: string
-  routeKey?: string
-  origin?: string
-  destination?: string
-  departureDate?: string
-  bookingWindowDays?: number
-  collectionDate?: string
-  sourceId?: string
-  airline?: string
-  airlineCode?: string
-  flightNumber?: string
-  departureTime?: string
-  arrivalTime?: string
-  durationMinutes?: number
-  stops?: number
-  price?: number
-  currency?: string
-  seatsRemaining?: number
-  source?: string
-  sourceType?: FareSnapshot['sourceType']
-  confidence?: number
-  collectedAt?: string
+const routeCache = new Map<string, { expiresAt: number; snapshots: FareSnapshot[] }>()
+const robotsCache = new Map<string, { expiresAt: number; disallowed: string[] }>()
+const DUFFEL_RETRIES = Math.max(0, Number(process.env.DUFFEL_RETRIES ?? '2'))
+const SOURCE_DELAY_MS = Math.max(0, Number(process.env.SOURCE_RATE_LIMIT_MS ?? '250'))
+
+async function robotsAllowed(targetUrl: string) {
+  let origin: string
+  try {
+    origin = new URL(targetUrl).origin
+  } catch {
+    return false
+  }
+
+  const cached = robotsCache.get(origin)
+  let disallowed = cached?.expiresAt && cached.expiresAt > Date.now() ? cached.disallowed : null
+  if (!disallowed) {
+    try {
+      const response = await fetch(`${origin}/robots.txt`)
+      const body = response.ok ? await response.text() : ''
+      disallowed = body.split(/\r?\n/).reduce<string[]>((rules, line) => {
+        const match = line.match(/^\s*Disallow:\s*(\S*)/i)
+        if (match?.[1]) rules.push(match[1])
+        return rules
+      }, [])
+      robotsCache.set(origin, { expiresAt: Date.now() + 3_600_000, disallowed })
+    } catch {
+      return false
+    }
+  }
+
+  const pathname = new URL(targetUrl).pathname
+  return !disallowed.some((rule) => rule === '/' || pathname.startsWith(rule))
 }
 
-type ExpandedRoute = FareSourceRoute & {
-  bookingWindowDays: number
-  collectionDate: string
+function todayInIndia() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: IST_TIME_ZONE }).format(new Date())
 }
 
-function getTodayInIST() {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: IST_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(new Date())
-
-  const year = parts.find((part) => part.type === 'year')?.value ?? '1970'
-  const month = parts.find((part) => part.type === 'month')?.value ?? '01'
-  const day = parts.find((part) => part.type === 'day')?.value ?? '01'
-  return `${year}-${month}-${day}`
-}
-
-function addDays(dateString: string, offset: number) {
-  const value = new Date(`${dateString}T00:00:00Z`)
-  value.setUTCDate(value.getUTCDate() + offset)
+function addDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00Z`)
+  value.setUTCDate(value.getUTCDate() + days)
   return value.toISOString().slice(0, 10)
 }
 
-function deriveBookingWindowDays(collectionDate: string, departureDate: string) {
-  const collection = new Date(`${collectionDate}T00:00:00Z`).getTime()
-  const departure = new Date(`${departureDate}T00:00:00Z`).getTime()
-  if (!Number.isFinite(collection) || !Number.isFinite(departure)) {
-    return 0
-  }
-
-  return Math.max(0, Math.round((departure - collection) / 86_400_000))
-}
-
-function deriveRouteKey(origin: string, destination: string, departureDate: string) {
-  return `${origin.toUpperCase()}-${destination.toUpperCase()}-${departureDate}`
-}
-
-function parseNumber(value: string, fallback = 0) {
-  const parsed = Number(value.replace(/[^\d.-]/g, ''))
-  return Number.isFinite(parsed) ? parsed : fallback
-}
-
-function parseDurationMinutes(value: string) {
-  const normalized = value.trim().toLowerCase()
-  const hours = normalized.match(/(\d+(?:\.\d+)?)\s*h/)?.[1]
-  const minutes = normalized.match(/(\d+)\s*m/)?.[1]
-  if (hours || minutes) {
-    return Math.round(Number(hours ?? 0) * 60 + Number(minutes ?? 0))
-  }
-
-  return parseNumber(normalized)
-}
-
-function parseStops(value: string) {
-  const normalized = value.trim().toLowerCase()
-  if (normalized.includes('non-stop') || normalized.includes('nonstop') || normalized.includes('direct')) {
-    return 0
-  }
-
-  return parseNumber(normalized)
-}
-
-function normalizeSnapshot(snapshot: ExtractedSnapshot, sourceType: FareSnapshot['sourceType']): FareSnapshot {
-  const origin = (snapshot.origin ?? '').trim().toUpperCase()
-  const destination = (snapshot.destination ?? '').trim().toUpperCase()
-  const departureDate = (snapshot.departureDate ?? '').trim()
-  const bookingWindowDays = Math.max(0, Math.round(snapshot.bookingWindowDays ?? 0))
-  const collectionDate = (snapshot.collectionDate ?? snapshot.collectedAt ?? new Date().toISOString()).trim().slice(0, 10)
-  const routeKey = (snapshot.routeKey ?? deriveRouteKey(origin || 'UNK', destination || 'UNK', departureDate || '1970-01-01'))
-    .trim()
-    .toUpperCase()
-
+function routeInput(route: TrackedRoute, collectionDate: string): FlightSearchRequest {
   return {
-    id: snapshot.id.trim(),
-    routeKey,
-    origin,
-    destination,
-    departureDate,
-    bookingWindowDays,
-    collectionDate,
-    collectedAt: snapshot.collectedAt ?? new Date().toISOString(),
-    sourceId: snapshot.sourceId?.trim() || undefined,
-    airline: (snapshot.airline ?? 'Unknown airline').trim(),
-    airlineCode: (snapshot.airlineCode ?? 'XX').trim().toUpperCase(),
-    flightNumber: (snapshot.flightNumber ?? 'XX0').trim(),
-    departureTime: (snapshot.departureTime ?? '--:--').trim(),
-    arrivalTime: (snapshot.arrivalTime ?? '--:--').trim(),
-    durationMinutes: Math.max(0, Math.round(snapshot.durationMinutes ?? 0)),
-    stops: Math.max(0, Math.round(snapshot.stops ?? 0)),
-    price: Math.max(0, Math.round(snapshot.price ?? 0)),
-    currency: (snapshot.currency ?? 'INR').trim().toUpperCase(),
-    seatsRemaining: Math.max(0, Math.round(snapshot.seatsRemaining ?? 0)),
-    source: (snapshot.source ?? 'Configured source').trim(),
-    sourceType,
-    confidence: Math.min(1, Math.max(0, Number(snapshot.confidence) || 0)),
+    origin: route.origin,
+    destination: route.destination,
+    departureDate: route.departureDate ?? addDays(collectionDate, route.bookingWindowDays ?? 1),
+    adults: route.adults ?? 1,
   }
 }
 
-function fallbackSnapshotsForSource(): ExtractedSnapshot[] {
+function routeInputs(route: TrackedRoute, collectionDate: string) {
+  if (route.departureDate || route.bookingWindowDays !== undefined) {
+    return [routeInput(route, collectionDate)]
+  }
+
+  return ADVANCE_WINDOWS.map((bookingWindowDays) => routeInput({ ...route, bookingWindowDays }, collectionDate))
+}
+
+function flightKey(snapshot: FareSnapshot) {
+  return [snapshot.routeKey, snapshot.airlineCode, snapshot.flightNumber, snapshot.departureTime].join('|').toUpperCase()
+}
+
+function cheapestUnique(snapshots: FareSnapshot[]) {
+  const byFlight = new Map<string, FareSnapshot>()
+  for (const snapshot of snapshots) {
+    const current = byFlight.get(flightKey(snapshot))
+    if (!current || snapshot.price < current.price) byFlight.set(flightKey(snapshot), snapshot)
+  }
+  return [...byFlight.values()].sort((left, right) => left.price - right.price)
+}
+
+async function scrapeSources(browser: Browser, input: FlightSearchRequest) {
+  const cacheKey = `${input.origin}-${input.destination}-${input.departureDate}`.toUpperCase()
+  const cached = routeCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.snapshots
+
+  const scrapers = loadWebsiteScrapers()
+  if (!scrapers.length) return []
+
+  const settled = await mapWithConcurrency(scrapers, async (scraper) => {
+    const sourceName = scraper.definition.name
+    console.info(`[scraper] ${sourceName} STARTED route=${input.origin}-${input.destination}-${input.departureDate}`)
+    try {
+      const targetUrl = scraper.definition.buildSearchUrl?.(input) ?? scraper.definition.url
+      if (!(await robotsAllowed(targetUrl))) {
+        console.warn(`[scraper] ${sourceName} SKIPPED by robots.txt`)
+        return []
+      }
+      if (SOURCE_DELAY_MS > 0) await new Promise((resolve) => setTimeout(resolve, SOURCE_DELAY_MS))
+      const timeout = new Promise<FareSnapshot[]>((_, reject) => {
+        setTimeout(() => reject(new Error(`${scraper.definition.name} timed out`)), SCRAPE_TIMEOUT_MS)
+      })
+      const snapshots = await Promise.race([scraper.scrape(browser, input), timeout])
+      if (snapshots.length > 0) {
+        console.info(`[scraper] ${sourceName} SUCCESS fares=${snapshots.length}`)
+      } else {
+        console.info(`[scraper] ${sourceName} NO FARES`)
+      }
+      return snapshots
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const status = /timed out|timeout|aborted/i.test(message) ? 'TIMEOUT' : 'FAILED'
+      console.warn(`[scraper] ${sourceName} ${status}: ${message}`)
+      return []
+    }
+  })
+
+  const snapshots = settled
+    .flat()
+    .filter((snapshot) => !!snapshot && !!snapshot.routeKey)
+
+  if (CACHE_TTL_MS > 0) routeCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, snapshots })
+  return snapshots
+}
+
+function offerToSnapshot(offer: NormalizedFlightOffer, input: FlightSearchRequest, sourceType: FareSnapshot['sourceType'] = 'duffel'): FareSnapshot {
+  const collectionDate = todayInIndia()
+  return {
+    id: offer.offerId,
+    routeKey: `${offer.origin}-${offer.destination}-${input.departureDate}`,
+    origin: offer.origin,
+    destination: offer.destination,
+    departureDate: input.departureDate,
+    bookingWindowDays: Math.max(0, Math.round((new Date(`${input.departureDate}T00:00:00Z`).getTime() - new Date(`${collectionDate}T00:00:00Z`).getTime()) / 86_400_000)),
+    collectionDate,
+    collectedAt: offer.collectedAt,
+    sourceId: sourceType,
+    collectionStage: sourceType === 'duffel' ? 'DUFFEL' : 'DEMO',
+    airline: offer.airline,
+    airlineCode: offer.airlineCode,
+    flightNumber: offer.flightNumber,
+    departureTime: offer.departureTime,
+    arrivalTime: offer.arrivalTime,
+    durationMinutes: Number.parseInt(offer.duration, 10) * 60 + Number.parseInt(offer.duration.match(/(\d{2})m/)?.[1] ?? '0', 10),
+    stops: offer.stops,
+    price: offer.price,
+    baseFare: offer.baseFare,
+    taxes: offer.taxes,
+    udf: offer.udf,
+    convenienceFee: offer.convenienceFee,
+    totalFare: offer.totalFare ?? offer.price,
+    currency: offer.currency,
+    seatsRemaining: offer.seatsRemaining,
+    soldOut: offer.seatsRemaining <= 0,
+    source: offer.source,
+    sourceType,
+    confidence: offer.confidence,
+  }
+}
+
+async function collectDuffel(input: FlightSearchRequest) {
+  for (let attempt = 0; attempt <= DUFFEL_RETRIES; attempt += 1) {
+    try {
+      if (SOURCE_DELAY_MS > 0) await new Promise((resolve) => setTimeout(resolve, SOURCE_DELAY_MS))
+      return (await searchDuffelOffers(input)).map((offer) => offerToSnapshot(offer, input))
+    } catch (error) {
+      if (attempt === DUFFEL_RETRIES) {
+        console.warn(`[duffel] FAILED route=${input.origin}-${input.destination}-${input.departureDate}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
   return []
 }
 
-function expandSourceRoutes(source: FareSourceConfig, collectionDate: string, routeFilter?: FareSourceRoute) {
-  const windows = source.bookingWindows?.length ? source.bookingWindows : DEFAULT_BOOKING_WINDOWS
-  const baseRoutes = source.routes?.length ? source.routes : loadTrackedRoutes()
+function demoFallback(input: FlightSearchRequest) {
+  return DEFAULT_FARE_SNAPSHOTS
+    .filter((snapshot) => snapshot.origin === input.origin.toUpperCase() && snapshot.destination === input.destination.toUpperCase())
+    .map((snapshot) => ({
+      ...snapshot,
+      id: `demo-${snapshot.id}`,
+      departureDate: input.departureDate,
+      routeKey: `${input.origin.toUpperCase()}-${input.destination.toUpperCase()}-${input.departureDate}`,
+      source: 'Demo fallback',
+      collectionStage: 'DEMO' as const,
+      sourceType: 'demo' as const,
+      collectedAt: new Date().toISOString(),
+    }))
+}
 
-  const expanded: ExpandedRoute[] = []
-  for (const route of baseRoutes) {
-    const isRequestedRoute =
-      route.origin.toUpperCase() === routeFilter?.origin.toUpperCase() &&
-      route.destination.toUpperCase() === routeFilter?.destination.toUpperCase()
+async function mapWithConcurrency<T, R>(items: T[], worker: (item: T) => Promise<R>) {
+  const results = new Array(items.length) as R[]
+  let cursor = 0
 
-    if (routeFilter?.departureDate && isRequestedRoute) {
-      expanded.push({
-        origin: route.origin,
-        destination: route.destination,
-        departureDate: routeFilter.departureDate,
-        bookingWindowDays: deriveBookingWindowDays(collectionDate, routeFilter.departureDate),
-        collectionDate,
-      })
-      continue
-    }
-
-    if (route.departureDate) {
-      expanded.push({
-        origin: route.origin,
-        destination: route.destination,
-        departureDate: route.departureDate,
-        bookingWindowDays:
-          typeof route.bookingWindowDays === 'number' && Number.isFinite(route.bookingWindowDays)
-            ? Math.max(0, Math.round(route.bookingWindowDays))
-            : deriveBookingWindowDays(collectionDate, route.departureDate),
-        collectionDate,
-      })
-      continue
-    }
-
-    for (const window of windows) {
-      expanded.push({
-        origin: route.origin,
-        destination: route.destination,
-        departureDate: addDays(collectionDate, window),
-        bookingWindowDays: window,
-        collectionDate,
-      })
+  async function consume() {
+    while (true) {
+      const index = cursor
+      cursor += 1
+      if (index >= items.length) return
+      results[index] = await worker(items[index])
     }
   }
 
-  return expanded
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT, items.length) }, () => consume()))
+  return results
 }
 
-function routeMatchesFilter(route: ExpandedRoute, filter?: FareSourceRoute) {
-  if (!filter) {
-    return true
-  }
-
-  if (route.origin.toUpperCase() !== filter.origin.toUpperCase()) {
-    return false
-  }
-
-  if (route.destination.toUpperCase() !== filter.destination.toUpperCase()) {
-    return false
-  }
-
-  if (filter.departureDate && route.departureDate !== filter.departureDate) {
-    return false
-  }
-
-  return true
-}
-
-function matchesAny(value: string, patterns: RegExp[]) {
-  return patterns.some((pattern) => pattern.test(value))
-}
-
-async function fillFieldByHints(page: any, patterns: RegExp[], value: string) {
-  const inputs = page.locator('input, textarea')
-  const count = await inputs.count()
-
-  for (let index = 0; index < count; index += 1) {
-    const field = inputs.nth(index)
-    try {
-      const metadata = await field.evaluate((element: any) => ({
-        placeholder: element.getAttribute('placeholder') ?? '',
-        ariaLabel: element.getAttribute('aria-label') ?? '',
-        name: element.getAttribute('name') ?? '',
-        id: element.getAttribute('id') ?? '',
-        type: element.getAttribute('type') ?? '',
-        value: element?.value ?? '',
-      }))
-
-      const haystack = `${metadata.placeholder} ${metadata.ariaLabel} ${metadata.name} ${metadata.id} ${metadata.type}`.toLowerCase()
-      if (!matchesAny(haystack, patterns)) {
-        continue
-      }
-
-      if (metadata.value && !['date', 'text', 'search', 'email', 'tel', 'number'].includes(metadata.type)) {
-        continue
-      }
-
-      await field.click({ force: true }).catch(() => undefined)
-      await field.fill(value).catch(() => field.type(value, { delay: 20 }))
-      return true
-    } catch {
-      continue
-    }
-  }
-
-  return false
-}
-
-async function clickButtonByHints(page: any, patterns: RegExp[]) {
-  const buttons = page.locator('button, [role="button"], input[type="submit"], input[type="button"]')
-  const count = await buttons.count()
-
-  for (let index = 0; index < count; index += 1) {
-    const button = buttons.nth(index)
-    try {
-      const metadata = await button.evaluate((element: any) => ({
-        text: (element.textContent ?? '').trim(),
-        ariaLabel: element.getAttribute('aria-label') ?? '',
-        title: element.getAttribute('title') ?? '',
-        value: element?.value ?? '',
-      }))
-
-      const haystack = `${metadata.text} ${metadata.ariaLabel} ${metadata.title} ${metadata.value}`.toLowerCase()
-      if (!matchesAny(haystack, patterns)) {
-        continue
-      }
-
-      await button.click({ force: true })
-      return true
-    } catch {
-      continue
-    }
-  }
-
-  return false
-}
-
-async function prepareSearchForm(page: any, route: ExpandedRoute) {
-  await fillFieldByHints(page, [/from/i, /origin/i, /departing from/i, /departure airport/i], route.origin)
-  await fillFieldByHints(page, [/to/i, /destination/i, /going to/i, /arrival airport/i], route.destination)
-  await fillFieldByHints(page, [/date/i, /departure/i, /travel date/i, /journey date/i], route.departureDate ?? '')
-
-  const clicked = await clickButtonByHints(page, [/search/i, /find flights/i, /show flights/i, /search flights/i, /book now/i, /go/i])
-  if (!clicked) {
-    await page.keyboard.press('Enter').catch(() => undefined)
-  }
-
-  await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => undefined)
-  await page.waitForTimeout(2_000)
-}
-
-function extractDataAttribute(card: any, selector: string | undefined) {
-  if (!selector) {
-    return ''
-  }
-
-  const dataAttrMatch = selector.trim().match(/^\[data-([a-z0-9-]+)\]$/i)
-  if (dataAttrMatch?.[1]) {
-    return card.getAttribute(`data-${dataAttrMatch[1]}`)?.trim() ?? ''
-  }
-
-  return ''
-}
-
-function extractText(card: any, selector: string | undefined) {
-  if (!selector) {
-    return ''
-  }
-
-  const matched = card.querySelector(selector)
-  if (matched) {
-    return (matched.textContent ?? matched.getAttribute('content') ?? '').trim()
-  }
-
-  return extractDataAttribute(card, selector)
-}
-
-function extractByPath(input: unknown, path: string | undefined) {
-  if (!path) {
-    return input
-  }
-
-  const parts = path.replace(/^\$\.?/, '').split('.').filter(Boolean)
-  let current: any = input
-  for (const part of parts) {
-    if (current == null) {
-      return undefined
-    }
-
-    const match = part.match(/^([^[\]]+)(?:\[(\d+)\])?$/)
-    if (!match) {
-      return undefined
-    }
-
-    const [, key, index] = match
-    current = current?.[key]
-    if (index !== undefined) {
-      current = current?.[Number(index)]
-    }
-  }
-
-  return current
-}
-
-function extractTextFromObject(item: unknown, selector: string | undefined) {
-  if (!selector) {
-    return ''
-  }
-
-  const value = extractByPath(item, selector)
-  if (typeof value === 'string') {
-    return value.trim()
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value)
-  }
-
-  return ''
-}
-
-async function scrapePageSource(
-  browser: any,
-  source: FareSourceConfig,
-  route: ExpandedRoute,
-) {
-  const resolvedUrl = renderFareSourceTemplate(source.url ?? '', route).trim()
-  if (!resolvedUrl) {
-    return fallbackSnapshotsForSource().map((snapshot) =>
-      normalizeSnapshot({ ...snapshot, bookingWindowDays: route.bookingWindowDays, collectionDate: route.collectionDate }, source.sourceType),
-    )
-  }
-
-  const page = await browser.newPage()
+async function collectForInputs(inputs: FlightSearchRequest[]) {
+  const scrapers = loadWebsiteScrapers()
+  const browser = scrapers.length ? await chromium.launch({ headless: process.env.SCRAPER_HEADLESS?.toLowerCase() !== 'false' }) : null
   try {
-    await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-    await prepareSearchForm(page, route)
-    const snapshots: ExtractedSnapshot[] = await page.$$eval(
-      source.selectors.card,
-      (cards: any[], selectors: any) =>
-        cards.map((card: any) => {
-          const element = card as any
-
-          const read = (selector: string | undefined) => {
-            if (!selector) {
-              return ''
-            }
-
-            const matched = element.querySelector(selector)
-            if (matched) {
-              return (matched.textContent ?? matched.getAttribute('content') ?? '').trim()
-            }
-
-            const dataAttrMatch = selector.trim().match(/^\[data-([a-z0-9-]+)\]$/i)
-            if (dataAttrMatch?.[1]) {
-              return element.getAttribute(`data-${dataAttrMatch[1]}`)?.trim() ?? ''
-            }
-
-            return ''
-          }
-
-          const id = read(selectors.id) || read(selectors.routeKey) || `${Date.now()}-${Math.random().toString(16).slice(2)}`
-
-          return {
-            id,
-            routeKey: read(selectors.routeKey) || '',
-            origin: read(selectors.origin),
-            destination: read(selectors.destination),
-            departureDate: read(selectors.departureDate),
-            collectedAt: new Date().toISOString(),
-            sourceId: source.id ?? source.name,
-            airline: read(selectors.airline),
-            airlineCode: read(selectors.airlineCode),
-            flightNumber: read(selectors.flightNumber),
-            departureTime: read(selectors.departureTime),
-            arrivalTime: read(selectors.arrivalTime),
-            durationMinutes: parseDurationMinutes(read(selectors.durationMinutes)),
-            stops: parseStops(read(selectors.stops)),
-            price: parseNumber(read(selectors.price)),
-            currency: read(selectors.currency) || 'INR',
-            seatsRemaining: parseNumber(read(selectors.seatsRemaining)),
-            source: read(selectors.source) || '',
-            sourceType: 'airline',
-            confidence: Number(read(selectors.confidence) || '0.85'),
-          }
-        }),
-      source.selectors,
-    )
-
-    const normalized = snapshots
-      .map((snapshot) =>
-        normalizeSnapshot(
-          {
-            ...(snapshot as ExtractedSnapshot),
-            bookingWindowDays: route.bookingWindowDays,
-            collectionDate: route.collectionDate,
-            origin: String((snapshot as ExtractedSnapshot).origin || route.origin),
-            destination: String((snapshot as ExtractedSnapshot).destination || route.destination),
-            departureDate: String((snapshot as ExtractedSnapshot).departureDate || route.departureDate),
-            routeKey:
-              (snapshot as ExtractedSnapshot).routeKey ||
-              deriveRouteKey(
-                String((snapshot as ExtractedSnapshot).origin ?? route.origin),
-                String((snapshot as ExtractedSnapshot).destination ?? route.destination),
-                route.departureDate ?? addDays(route.collectionDate, route.bookingWindowDays || 0),
-              ),
-          },
-          source.sourceType,
-        ),
-      )
-      .filter((snapshot): snapshot is FareSnapshot => Boolean(snapshot.origin && snapshot.destination && snapshot.departureDate && snapshot.price > 0))
-
-    if (normalized.length) {
-      return normalized
-    }
-
-    return fallbackSnapshotsForSource().map((snapshot) =>
-      normalizeSnapshot({ ...snapshot, bookingWindowDays: route.bookingWindowDays, collectionDate: route.collectionDate }, source.sourceType),
-    )
-  } catch {
-    return fallbackSnapshotsForSource().map((snapshot) =>
-      normalizeSnapshot({ ...snapshot, bookingWindowDays: route.bookingWindowDays, collectionDate: route.collectionDate }, source.sourceType),
-    )
+    const results = await mapWithConcurrency(inputs, async (input) => {
+      const scraped = browser ? await scrapeSources(browser, input) : []
+      if (scraped.length) return scraped
+      const duffel = await collectDuffel(input)
+      return duffel.length ? duffel : demoFallback(input)
+    })
+    const collectionDate = todayInIndia()
+    const snapshots = results.flat().map((snapshot) => {
+      const departure = new Date(`${snapshot.departureDate}T00:00:00Z`).getTime()
+      const collection = new Date(`${collectionDate}T00:00:00Z`).getTime()
+      const bookingWindowDays = Number.isFinite(departure) && Number.isFinite(collection)
+        ? Math.max(0, Math.round((departure - collection) / 86_400_000))
+        : snapshot.bookingWindowDays ?? 0
+      return { ...snapshot, bookingWindowDays }
+    })
+    return cheapestUnique(snapshots)
   } finally {
-    await page.close()
+    await browser?.close()
   }
-}
-
-async function scrapeApiSource(source: FareSourceConfig, route: ExpandedRoute) {
-  const resolvedUrl = renderFareSourceTemplate(source.url ?? '', route).trim()
-  if (!resolvedUrl) {
-    return fallbackSnapshotsForSource().map((snapshot) =>
-      normalizeSnapshot({ ...snapshot, bookingWindowDays: route.bookingWindowDays, collectionDate: route.collectionDate }, source.sourceType),
-    )
-  }
-
-  const method = source.method ?? 'GET'
-  const headers = renderFareSourceTemplate(source.headers ?? {}, route)
-  const body = method === 'POST' ? renderFareSourceTemplate(source.body ?? undefined, route) : undefined
-
-  const response = await fetch(resolvedUrl, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...headers,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
-
-  if (!response.ok) {
-    throw new Error(`API source ${source.name} failed with status ${response.status}`)
-  }
-
-  const contentType = response.headers.get('content-type') ?? ''
-  const payload = contentType.includes('application/json') ? await response.json() : await response.text()
-  const records = extractByPath(payload, source.responsePath) ?? payload
-  const items = Array.isArray(records) ? records : []
-  const fields = source.apiFields ?? {}
-
-  const snapshots = items
-    .map((item) =>
-      normalizeSnapshot(
-        {
-          id: extractTextFromObject(item, fields.id) || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          routeKey: extractTextFromObject(item, fields.routeKey),
-          origin: extractTextFromObject(item, fields.origin) || route.origin,
-          destination: extractTextFromObject(item, fields.destination) || route.destination,
-          departureDate: extractTextFromObject(item, fields.departureDate) || route.departureDate,
-          bookingWindowDays: route.bookingWindowDays,
-          collectionDate: route.collectionDate,
-          airline: extractTextFromObject(item, fields.airline),
-          airlineCode: extractTextFromObject(item, fields.airlineCode),
-          flightNumber: extractTextFromObject(item, fields.flightNumber),
-          departureTime: extractTextFromObject(item, fields.departureTime),
-          arrivalTime: extractTextFromObject(item, fields.arrivalTime),
-          durationMinutes: parseDurationMinutes(extractTextFromObject(item, fields.durationMinutes)),
-          stops: parseStops(extractTextFromObject(item, fields.stops)),
-          price: parseNumber(extractTextFromObject(item, fields.price)),
-          currency: extractTextFromObject(item, fields.currency) || 'INR',
-          seatsRemaining: parseNumber(extractTextFromObject(item, fields.seatsRemaining)),
-          source: extractTextFromObject(item, fields.source) || source.name,
-          sourceId: source.id ?? source.name,
-          sourceType: source.sourceType,
-          confidence: Number(extractTextFromObject(item, fields.confidence) || '0.85'),
-          collectedAt: new Date().toISOString(),
-        },
-        source.sourceType,
-      ),
-    )
-    .filter((snapshot) => snapshot.origin && snapshot.destination && snapshot.departureDate && snapshot.price > 0)
-
-  if (snapshots.length) {
-    return snapshots
-  }
-
-  return fallbackSnapshotsForSource().map((snapshot) =>
-    normalizeSnapshot({ ...snapshot, bookingWindowDays: route.bookingWindowDays, collectionDate: route.collectionDate }, source.sourceType),
-  )
-}
-
-async function scrapeConfiguredSource(
-  browser: any,
-  source: FareSourceConfig,
-  collectionDate: string,
-  routeFilter?: FareSourceRoute,
-) {
-  const routes = expandSourceRoutes(source, collectionDate, routeFilter).filter((route) => routeMatchesFilter(route, routeFilter))
-  const collected = await Promise.all(
-    routes.map(async (route) => {
-      if (source.kind === 'api') {
-        return scrapeApiSource(source, route)
-      }
-
-      return scrapePageSource(browser, source, route)
-    }),
-  )
-
-  return collected.flat()
 }
 
 export async function collectFareSnapshots() {
-  const sources = await loadFareSourceConfigs()
-  if (!sources.length) {
-    return []
-  }
-
-  const browser = await chromium.launch({ headless: true })
-  const collectionDate = getTodayInIST()
-
-  try {
-    const collected = await Promise.all(sources.map((source) => scrapeConfiguredSource(browser, source, collectionDate)))
-    return collected.flat()
-  } finally {
-    await browser.close()
-  }
+  const collectionDate = todayInIndia()
+  return collectForInputs(loadTrackedRoutes().flatMap((route) => routeInputs(route, collectionDate)))
 }
 
-export async function collectFareSnapshotsForRoute(route: FareSourceRoute) {
-  const sources = await loadFareSourceConfigs()
-  if (!sources.length) {
-    return []
-  }
-
-  const browser = await chromium.launch({ headless: true })
-  const collectionDate = getTodayInIST()
-
-  try {
-    const collected = await Promise.all(sources.map((source) => scrapeConfiguredSource(browser, source, collectionDate, route)))
-    return collected.flat()
-  } finally {
-    await browser.close()
-  }
+export async function collectFareSnapshotsForRoute(route: TrackedRoute) {
+  const collectionDate = todayInIndia()
+  return collectForInputs([routeInput(route, collectionDate)])
 }

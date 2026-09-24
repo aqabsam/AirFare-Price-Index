@@ -1,3 +1,5 @@
+import type { FlightSearchRequest, NormalizedFlightOffer } from '../types/flight.js'
+
 export class DuffelProviderError extends Error {
   statusCode: number
 
@@ -8,54 +10,43 @@ export class DuffelProviderError extends Error {
   }
 }
 
-type DuffelSearchInput = {
-  origin: string
-  destination: string
-  departureDate: string
-  adults: number
+type DuffelCarrier = {
+  name?: string | null
+  iata_code?: string | null
 }
 
-type DuffelOfferSegment = {
-  departing_at?: string
-  arriving_at?: string
-  operating_carrier?: { name?: string; iata_code?: string }
-  marketing_carrier?: { name?: string; iata_code?: string }
-  operating_carrier_flight_number?: string | number
-  marketing_carrier_flight_number?: string | number
-  flight_number?: string | number
+type DuffelSegment = {
+  operating_carrier?: DuffelCarrier | null
+  marketing_carrier?: DuffelCarrier | null
+  operating_carrier_flight_number?: string | null
+  marketing_carrier_flight_number?: string | null
+  flight_number?: string | null
+  departing_at?: string | null
+  arriving_at?: string | null
+}
+
+type DuffelSlice = {
+  origin?: { iata_code?: string | null } | null
+  destination?: { iata_code?: string | null } | null
+  segments?: DuffelSegment[] | null
 }
 
 type DuffelOffer = {
-  id?: string
-  total_amount?: string | number
-  total_currency?: string
-  total_duration?: string
-  slices?: Array<{
-    origin?: { iata_code?: string }
-    destination?: { iata_code?: string }
-    segments?: DuffelOfferSegment[]
-  }>
+  id?: string | null
+  total_amount?: number | string | null
+  total_currency?: string | null
+  total_duration?: string | null
+  slices?: DuffelSlice[] | null
 }
 
-export type LiveFlightOffer = {
-  airline: string
-  airlineCode: string
-  flightNumber: string
-  origin: string
-  destination: string
-  departureTime: string
-  arrivalTime: string
-  duration: string
-  stops: number
-  price: number
-  currency: string
-  offerId: string
+type DuffelPayload = {
+  data?: { offers?: DuffelOffer[] | null }
+  offers?: DuffelOffer[] | null
+  errors?: Array<{ message?: string | null; title?: string | null }>
 }
 
-function parseIsoDuration(duration?: string) {
-  if (!duration) {
-    return null
-  }
+function parseIsoDuration(duration: string | null | undefined): number | null {
+  if (!duration) return null
 
   const isoMatch = duration.match(/^P(?:T)?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i)
   if (isoMatch) {
@@ -83,24 +74,17 @@ function parseIsoDuration(duration?: string) {
 
 function formatDuration(minutes: number) {
   const hours = Math.floor(minutes / 60)
-  const remaining = minutes % 60
-  return `${hours}h ${String(remaining).padStart(2, '0')}m`
+  const remainder = minutes % 60
+  return `${hours}h ${String(remainder).padStart(2, '0')}m`
 }
 
-function formatClockTime(isoString?: string) {
-  if (!isoString) {
-    return '--:--'
-  }
-
+function formatClockTime(isoString: string | null | undefined) {
+  if (!isoString) return '--:--'
   const clockMatch = isoString.match(/T(\d{2}:\d{2})/)
-  if (clockMatch) {
-    return clockMatch[1]
-  }
-
-  return '--:--'
+  return clockMatch ? clockMatch[1] : '--:--'
 }
 
-function calculateDuration(startIso?: string, endIso?: string, fallbackDuration?: string) {
+function calculateDuration(startIso: string | null | undefined, endIso: string | null | undefined, fallbackDuration: string | null | undefined) {
   if (startIso && endIso) {
     const start = new Date(startIso).getTime()
     const end = new Date(endIso).getTime()
@@ -109,76 +93,127 @@ function calculateDuration(startIso?: string, endIso?: string, fallbackDuration?
     }
   }
 
-  const parsed = parseIsoDuration(fallbackDuration)
+  const parsed = parseIsoDuration(fallbackDuration ?? null)
   return parsed !== null ? formatDuration(parsed) : '--'
 }
 
-function normalizeFlightNumber(carrierCode: string, rawNumber: string | number | undefined, offerId: string) {
-  if (rawNumber === undefined || rawNumber === null || rawNumber === '') {
-    return carrierCode ? `${carrierCode}${offerId.slice(-3)}` : offerId
-  }
+function isBlockedAirlineName(value: string | null | undefined) {
+  if (!value) return false
+  const normalized = value.trim().toLowerCase()
+  return (
+    normalized.includes('duffel') ||
+    normalized.includes('american express') ||
+    normalized.includes('amex') ||
+    normalized.includes('booking') ||
+    normalized.includes('payment') ||
+    normalized.includes('provider') ||
+    normalized.includes('travel')
+  )
+}
+
+function cleanAirlineCode(value: string | null | undefined) {
+  if (!value) return ''
+  const cleaned = value.trim().toUpperCase()
+  return /^[A-Z0-9]{2,3}$/.test(cleaned) ? cleaned : ''
+}
+
+function normalizeFlightNumber(airlineCode: string, rawNumber: string | null | undefined) {
+  if (rawNumber === undefined || rawNumber === null) return null
 
   const value = String(rawNumber).trim()
-  if (!value) {
-    return carrierCode ? `${carrierCode}${offerId.slice(-3)}` : offerId
+  if (!value) return null
+
+  const merged = value.toUpperCase()
+  if (/^[A-Z]{2,3}\d{1,5}$/.test(merged)) {
+    return merged
   }
 
-  return carrierCode && !value.toUpperCase().startsWith(carrierCode.toUpperCase()) ? `${carrierCode}${value}` : value
+  if (/^\d{1,5}$/.test(merged) && airlineCode) {
+    return `${airlineCode}${merged}`
+  }
+
+  return null
 }
 
-function toNumber(value: string | number | undefined) {
-  if (typeof value === 'number') {
-    return value
-  }
-
-  if (typeof value === 'string') {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : 0
-  }
-
-  return 0
-}
-
-function normalizeOffer(offer: DuffelOffer, requestedRoute: Pick<DuffelSearchInput, 'origin' | 'destination'>): LiveFlightOffer | null {
+export function normalizeDuffelOffer(offer: DuffelOffer, requestedRoute: FlightSearchRequest): NormalizedFlightOffer | null {
   const slice = offer.slices?.[0]
   const segments = slice?.segments ?? []
   const firstSegment = segments[0]
   const lastSegment = segments[segments.length - 1] ?? firstSegment
+
   if (!slice || !firstSegment || !lastSegment) {
     return null
   }
 
   const carrier = firstSegment.operating_carrier ?? firstSegment.marketing_carrier ?? {}
   const airline = carrier.name?.trim() || 'Unknown airline'
-  const airlineCode = carrier.iata_code?.trim().toUpperCase() || 'XX'
-  const offerId = offer.id?.trim() || ''
+  const airlineCode = cleanAirlineCode(carrier.iata_code)
+
+  if (!airline || !airlineCode || isBlockedAirlineName(airline) || airlineCode === 'ZZ') {
+    return null
+  }
+
+  const flightNumberValue = normalizeFlightNumber(
+    airlineCode,
+    firstSegment.operating_carrier_flight_number ?? firstSegment.marketing_carrier_flight_number ?? firstSegment.flight_number,
+  )
+
+  if (!flightNumberValue) {
+    return null
+  }
+
+  const priceValue = Number(offer.total_amount)
+  if (!Number.isFinite(priceValue) || priceValue <= 0) {
+    return null
+  }
+
+  const routeOrigin = slice.origin?.iata_code?.trim().toUpperCase() || requestedRoute.origin.toUpperCase()
+  const routeDestination = slice.destination?.iata_code?.trim().toUpperCase() || requestedRoute.destination.toUpperCase()
+
+  if (routeOrigin !== requestedRoute.origin.trim().toUpperCase() || routeDestination !== requestedRoute.destination.trim().toUpperCase()) {
+    return null
+  }
+
+  const requestedDate = requestedRoute.departureDate.trim()
+  const departureDate = firstSegment.departing_at?.slice(0, 10)
+  if (departureDate && departureDate !== requestedDate) {
+    return null
+  }
 
   return {
     airline,
     airlineCode,
-    flightNumber: normalizeFlightNumber(
-      airlineCode,
-      firstSegment.operating_carrier_flight_number ??
-        firstSegment.marketing_carrier_flight_number ??
-        firstSegment.flight_number,
-      offerId,
-    ),
-    origin: slice.origin?.iata_code?.trim().toUpperCase() || requestedRoute.origin,
-    destination: slice.destination?.iata_code?.trim().toUpperCase() || requestedRoute.destination,
+    flightNumber: flightNumberValue,
+    origin: routeOrigin,
+    destination: routeDestination,
     departureTime: formatClockTime(firstSegment.departing_at),
     arrivalTime: formatClockTime(lastSegment.arriving_at),
     duration: calculateDuration(firstSegment.departing_at, lastSegment.arriving_at, offer.total_duration),
     stops: Math.max(0, segments.length - 1),
-    price: toNumber(offer.total_amount),
-    currency: offer.total_currency?.trim().toUpperCase() || 'INR',
-    offerId,
+    price: priceValue,
+    currency: (offer.total_currency ?? 'INR').trim().toUpperCase() || 'INR',
+    offerId: offer.id?.trim() || `${airlineCode}-${flightNumberValue}`,
+    seatsRemaining: 1,
+    source: 'Duffel API',
+    sourceType: 'duffel',
+    collectedAt: new Date().toISOString(),
+    confidence: 0.82,
+    baseFare: priceValue,
+    taxes: 0,
+    udf: 0,
+    convenienceFee: 0,
+    totalFare: priceValue,
   }
 }
 
-export async function searchDuffelOffers(input: DuffelSearchInput): Promise<LiveFlightOffer[]> {
-  const apiKey = process.env.DUFFEL_API_KEY?.trim()
+export function getDuffelAccessToken() {
+  return process.env.DUFFEL_ACCESS_TOKEN?.trim() || process.env.DUFFEL_API_KEY?.trim() || ''
+}
+
+export async function searchDuffelOffers(input: FlightSearchRequest): Promise<NormalizedFlightOffer[]> {
+  const apiKey = getDuffelAccessToken()
   if (!apiKey) {
-    throw new DuffelProviderError('DUFFEL_API_KEY is not configured in backend/.env', 500)
+    throw new DuffelProviderError('DUFFEL_ACCESS_TOKEN or DUFFEL_API_KEY is not configured in backend/.env', 500)
   }
 
   const baseUrl = (process.env.DUFFEL_API_BASE_URL?.trim() || 'https://api.duffel.com').replace(/\/$/, '')
@@ -212,31 +247,24 @@ export async function searchDuffelOffers(input: DuffelSearchInput): Promise<Live
       signal: controller.signal,
     })
 
-    const payload = (await response.json().catch(() => null)) as
-      | { data?: { offers?: DuffelOffer[] }; offers?: DuffelOffer[]; errors?: Array<{ message?: string; title?: string }> }
-      | null
-
+    const payload = (await response.json().catch(() => null)) as DuffelPayload | null
     if (!response.ok) {
       const firstError = payload?.errors?.[0]
-      const message =
-        firstError?.message || firstError?.title || `Duffel request failed with status ${response.status}`
+      const message = firstError?.message || firstError?.title || `Duffel request failed with status ${response.status}`
       throw new DuffelProviderError(message, response.status)
     }
 
     const offers = payload?.data?.offers ?? payload?.offers ?? []
+
     return offers
-      .map((offer) => normalizeOffer(offer, input))
-      .filter((offer): offer is LiveFlightOffer => Boolean(offer))
+      .map((offer) => normalizeDuffelOffer(offer, input))
+      .filter((offer): offer is NormalizedFlightOffer => Boolean(offer))
       .sort((left, right) => left.price - right.price)
   } catch (error) {
-    if (error instanceof DuffelProviderError) {
-      throw error
-    }
-
+    if (error instanceof DuffelProviderError) throw error
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new DuffelProviderError('Duffel request timed out before returning offers', 504)
     }
-
     throw new DuffelProviderError('Unable to fetch live flight offers from Duffel', 502)
   } finally {
     clearTimeout(timeoutHandle)

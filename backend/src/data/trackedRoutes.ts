@@ -1,6 +1,7 @@
 export type TrackedRoute = {
   origin: string
   destination: string
+  adults?: number
   departureDate?: string
   bookingWindowDays?: number
   collectionDate?: string
