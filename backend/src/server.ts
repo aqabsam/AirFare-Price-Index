@@ -47,6 +47,14 @@ await app.register(flightsRoutes)
 await app.register(analyticsRoutes)
 await app.register(adminRoutes)
 
+app.get('/', async () => {
+  return {
+    ok: true,
+    service: 'AirFare Price Index API',
+    health: '/health',
+  }
+})
+
 app.get('/health', async () => {
   return {
     ok: true,
