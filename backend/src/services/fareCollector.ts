@@ -4,7 +4,6 @@ import type { FareSnapshot } from '../types/fare.js'
 import type { FlightSearchRequest } from '../types/flight.js'
 import { loadWebsiteScrapers } from '../scrapers/index.js'
 import { searchDuffelOffers } from '../providers/duffel.js'
-import { DEFAULT_FARE_SNAPSHOTS } from '../data/fareCatalog.js'
 import type { NormalizedFlightOffer } from '../types/flight.js'
 
 const MAX_CONCURRENT = Math.max(1, Math.min(4, Number(process.env.SCRAPER_MAX_CONCURRENT ?? '2')))
@@ -180,21 +179,6 @@ async function collectDuffel(input: FlightSearchRequest) {
   return []
 }
 
-function demoFallback(input: FlightSearchRequest) {
-  return DEFAULT_FARE_SNAPSHOTS
-    .filter((snapshot) => snapshot.origin === input.origin.toUpperCase() && snapshot.destination === input.destination.toUpperCase())
-    .map((snapshot) => ({
-      ...snapshot,
-      id: `demo-${snapshot.id}`,
-      departureDate: input.departureDate,
-      routeKey: `${input.origin.toUpperCase()}-${input.destination.toUpperCase()}-${input.departureDate}`,
-      source: 'Demo fallback',
-      collectionStage: 'DEMO' as const,
-      sourceType: 'demo' as const,
-      collectedAt: new Date().toISOString(),
-    }))
-}
-
 async function mapWithConcurrency<T, R>(items: T[], worker: (item: T) => Promise<R>) {
   const results = new Array(items.length) as R[]
   let cursor = 0
@@ -220,7 +204,7 @@ async function collectForInputs(inputs: FlightSearchRequest[]) {
       const scraped = browser ? await scrapeSources(browser, input) : []
       if (scraped.length) return scraped
       const duffel = await collectDuffel(input)
-      return duffel.length ? duffel : demoFallback(input)
+      return duffel
     })
     const collectionDate = todayInIndia()
     const snapshots = results.flat().map((snapshot) => {

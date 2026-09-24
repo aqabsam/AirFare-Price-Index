@@ -14,6 +14,10 @@ const app = fastify({
 
 const port = Number(process.env.PORT ?? '3000')
 const host = process.env.HOST ?? '0.0.0.0'
+const allowedOrigins = (process.env.CORS_ORIGINS ?? 'https://airfare-price.web.app,https://airfare-price.firebaseapp.com,http://localhost:5173,http://localhost:4173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean)
 
 async function isPortInUse(portNumber: number, hostName: string) {
   return await new Promise<boolean>((resolve) => {
@@ -34,7 +38,7 @@ if (await isPortInUse(port, host)) {
 }
 
 await app.register(cors, {
-  origin: [/^http:\/\/localhost:\d+$/, /^http:\/\/127\.0\.0\.1:\d+$/, /^http:\/\/0\.0\.0\.0:\d+$/],
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'OPTIONS'],
   credentials: false,
   allowedHeaders: ['Content-Type', 'Authorization'],

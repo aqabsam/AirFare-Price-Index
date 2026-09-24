@@ -10,6 +10,7 @@ const DATA_FILE = path.join(DATA_DIR, 'fare-snapshots.json')
 const DATABASE_URL = process.env.DATABASE_URL?.trim() || ''
 const DATABASE_SSL = process.env.DATABASE_SSL?.trim().toLowerCase() === 'require'
 const ALLOW_FILE_CACHE = process.env.FARE_ALLOW_FILE_CACHE?.trim().toLowerCase() === 'true'
+const ALLOW_DEMO_DATA = process.env.FARE_ALLOW_DEMO_DATA?.trim().toLowerCase() === 'true'
 
 type DbFareRow = {
   id: string
@@ -575,7 +576,7 @@ class FareStore {
       }
     }
 
-    const fallbackSnapshots = DEFAULT_FARE_SNAPSHOTS.length ? DEFAULT_FARE_SNAPSHOTS : []
+    const fallbackSnapshots = ALLOW_DEMO_DATA && DEFAULT_FARE_SNAPSHOTS.length ? DEFAULT_FARE_SNAPSHOTS : []
     if (fallbackSnapshots.length > 0) {
       this.snapshots = fallbackSnapshots.map(normalizeSnapshot)
       this.rawSnapshots = [...this.snapshots]
