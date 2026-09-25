@@ -1,9 +1,19 @@
 import { airportDisplayLabel, findAirport } from '@/data/airports'
-import type { FlightOffer, FlightSearchInput, FlightSearchResult } from '@/types/flight'
+import type { FlightOffer, FlightSearchInput, FlightSearchResult, FlightSearchStatus } from '@/types/flight'
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
+const SEARCH_TIMEOUT_MS = 300_000
+const inFlightRequests = new Map<string, Promise<FlightSearchResult>>()
+
+function searchRequestKey(input: FlightSearchInput) {
+  return `${String(input.origin || '').trim().toLowerCase()}|${String(input.destination || '').trim().toLowerCase()}|${String(input.travelDate || '').trim()}|${input.adults || 1}`
+}
 
 function buildApiUrl(path: string) {
   if (!API_BASE_URL) {
+    return path
+  }
+
+  if (API_BASE_URL.startsWith('http://localhost') || API_BASE_URL.startsWith('http://127.0.0.1')) {
     return path
   }
 
@@ -62,55 +72,106 @@ function toINR(price: number, currency: string) {
   return Math.round(price * rate)
 }
 
-function dedupeOffersByAirline(offers: FlightOffer[]) {
-  const cheapestByAirline = new Map<string, FlightOffer>()
+function buildFlightIdentity(offer: FlightOffer, travelDate: string) {
+  return [
+    offer.airlineCode || offer.airline,
+    offer.flightNumber,
+    offer.origin,
+    offer.destination,
+    travelDate,
+    offer.departureTime,
+    offer.arrivalTime,
+    String(offer.stops),
+  ].join('|').toLowerCase()
+}
+
+function normalizeOffers(offers: FlightOffer[], travelDate: string) {
+  const cheapestByItinerary = new Map<string, FlightOffer>()
 
   for (const offer of offers) {
-    const key = offer.airlineCode.trim().toUpperCase() || offer.airline.trim().toLowerCase()
-    const nextOffer = {
+    const normalizedOffer = {
       ...offer,
       price: toINR(offer.price, offer.currency),
       currency: 'INR',
     }
+    const itineraryKey = buildFlightIdentity(normalizedOffer, travelDate)
 
-    const current = cheapestByAirline.get(key)
-    if (!current || nextOffer.price < current.price) {
-      cheapestByAirline.set(key, nextOffer)
+    const current = cheapestByItinerary.get(itineraryKey)
+    if (!current || normalizedOffer.price < current.price) {
+      cheapestByItinerary.set(itineraryKey, normalizedOffer)
     }
   }
 
-  return [...cheapestByAirline.values()].sort((left, right) => left.price - right.price)
+  return [...cheapestByItinerary.values()].sort((left, right) => left.price - right.price)
 }
 
 export async function searchFlights(input: FlightSearchInput): Promise<FlightSearchResult> {
-  const response = await fetch(buildApiUrl('/api/flights/search'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      origin: toAirportCode(input.origin),
-      destination: toAirportCode(input.destination),
-      departureDate: input.travelDate,
-      adults: input.adults,
-    }),
-  })
-
-  const payload = (await response.json().catch(() => null)) as { offers?: FlightOffer[]; error?: string } | null
-
-  if (!response.ok) {
-    throw new Error(payload?.error ?? 'Unable to search flights right now. Please try again.')
+  const requestKey = searchRequestKey(input)
+  const existing = inFlightRequests.get(requestKey)
+  if (existing) {
+    return existing
   }
 
-  const offers = dedupeOffersByAirline(payload?.offers ?? [])
-  const routeLabels = getRouteLabels(input)
+  const request = (async () => {
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS)
 
-  return {
-    ...routeLabels,
-    travelDate: input.travelDate,
-    totalResults: offers.length,
-    cheapestOffer: offers[0] ?? null,
-    averagePrice: getAveragePrice(offers),
-    offers,
+    let response: Response
+    try {
+      response = await fetch(buildApiUrl('/api/flights/search'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          origin: toAirportCode(input.origin),
+          destination: toAirportCode(input.destination),
+          departureDate: input.travelDate,
+          adults: input.adults,
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error('Flight search timed out. Please make sure the backend is running and try again.')
+      }
+
+      throw error
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+
+    const payload = (await response.json().catch(() => null)) as {
+      offers?: FlightOffer[]
+      error?: string
+      message?: string
+      status?: FlightSearchStatus
+    } | null
+
+    if (!response.ok) {
+      throw new Error(payload?.error ?? 'Unable to search flights right now. Please try again.')
+    }
+
+    const offers = normalizeOffers(payload?.offers ?? [], input.travelDate)
+    const routeLabels = getRouteLabels(input)
+
+    return {
+      ...routeLabels,
+      travelDate: input.travelDate,
+      totalResults: offers.length,
+      cheapestOffer: offers[0] ?? null,
+      averagePrice: getAveragePrice(offers),
+      offers,
+      status: payload?.status ?? (offers.length ? 'duffel_success' : 'duffel_empty_no_fallback'),
+      message: payload?.message,
+    }
+  })()
+
+  inFlightRequests.set(requestKey, request)
+
+  try {
+    return await request
+  } finally {
+    inFlightRequests.delete(requestKey)
   }
 }

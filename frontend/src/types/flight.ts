@@ -16,14 +16,26 @@ export type FlightOffer = {
   duration: string
   stops: number
   price: number
+  baseFare?: number | null
+  taxes?: number | null
+  udf?: number | null
+  convenienceFee?: number | null
+  totalFare?: number | null
   currency: string
   offerId: string
   seatsRemaining: number
   source: string
-  sourceType: 'airline' | 'ota' | 'aggregated'
+  sourceType: 'airline' | 'ota' | 'duffel' | 'demo' | 'aggregated'
   collectedAt: string
   confidence: number
 }
+
+export type FlightSearchStatus =
+  | 'duffel_success'
+  | 'duffel_empty_with_fallback'
+  | 'duffel_empty_no_fallback'
+  | 'duffel_error_with_fallback'
+  | 'duffel_error_no_fallback'
 
 export type FlightSearchResult = {
   routeLabel: string
@@ -35,4 +47,6 @@ export type FlightSearchResult = {
   cheapestOffer: FlightOffer | null
   averagePrice: number
   offers: FlightOffer[]
+  status: FlightSearchStatus
+  message?: string
 }

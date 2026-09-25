@@ -123,4 +123,105 @@
     background: rgba(110, 231, 216, 0.32);
     color: #07111f;
   }
+
+  @keyframes flight-loader {
+    0% {
+      opacity: 0.7;
+      transform: translate3d(-42vw, 24px, 0) rotate(-7deg) scale(0.82);
+    }
+
+    45%,
+    55% {
+      opacity: 1;
+      transform: translate3d(0, -2px, 0) rotate(2deg) scale(1);
+    }
+
+    100% {
+      opacity: 0.7;
+      transform: translate3d(42vw, -24px, 0) rotate(7deg) scale(0.82);
+    }
+  }
+
+  .flight-loader-plane {
+    left: calc(50% - 8rem);
+    animation: flight-loader 5s ease-in-out 1;
+  }
+
+  .flight-loader-route {
+    animation: flight-route 5s ease-in-out 1;
+  }
+
+  .route-map-canvas {
+    position: relative;
+    height: 32rem;
+    min-height: 420px;
+  }
+
+  .route-map-canvas .leaflet-container {
+    height: 100%;
+    min-height: 420px;
+    background: #dce8ec;
+    font-family: var(--font-sans);
+  }
+
+  .airport-map-icon,
+  .route-plane-icon {
+    background: transparent;
+    border: 0;
+  }
+
+  .airport-map-pin {
+    display: block;
+    width: 28px;
+    height: 28px;
+    border: 3px solid #fff;
+    border-radius: 50% 50% 50% 0;
+    box-shadow: 0 5px 14px rgba(15, 23, 42, 0.35);
+    transform: rotate(-45deg);
+  }
+
+  .airport-map-pin-origin {
+    background: #f59e0b;
+  }
+
+  .airport-map-pin-destination {
+    background: #0f766e;
+  }
+
+  .airport-map-pin-dot {
+    display: block;
+    width: 8px;
+    height: 8px;
+    margin: 7px;
+    border-radius: 999px;
+    background: #fff;
+  }
+
+  .route-plane-icon span {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 2px solid #fff;
+    border-radius: 999px;
+    background: #0f172a;
+    color: #fbbf24;
+    font-size: 17px;
+    line-height: 1;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.4);
+    transform: rotate(45deg);
+  }
+
+  @keyframes flight-route {
+    0%,
+    100% {
+      opacity: 0.2;
+      transform: scaleX(0.7);
+    }
+
+    50% {
+      opacity: 0.8;
+      transform: scaleX(1);
+    }
+  }
 }

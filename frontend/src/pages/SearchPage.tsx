@@ -19,6 +19,8 @@ function getLocalDate() {
 }
 
 const today = getLocalDate()
+const MINIMUM_LOADING_TIME_MS = 5_000
+const LAST_AIRFARE_ROUTE_KEY = 'last-airfare-route'
 
 const initialSearch: FlightSearchInput = {
   origin: 'Patna - Jay Prakash Narayan Airport (PAT)',
@@ -35,8 +37,14 @@ function getErrorMessage(error: unknown) {
   return 'Unable to load flight pricing right now. Please try again.'
 }
 
+function waitForMinimumLoadingTime() {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, MINIMUM_LOADING_TIME_MS)
+  })
+}
+
 export function SearchPage({ theme }: SearchPageProps) {
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const initialQuery = useMemo<FlightSearchInput>(
     () => ({
       origin: searchParams.get('origin') || initialSearch.origin,
@@ -61,7 +69,7 @@ export function SearchPage({ theme }: SearchPageProps) {
       setError('')
 
       try {
-        const response = await searchFlights(initialQuery)
+        const [response] = await Promise.all([searchFlights(initialQuery), waitForMinimumLoadingTime()])
         if (active) {
           setResult(response)
         }
@@ -89,8 +97,24 @@ export function SearchPage({ theme }: SearchPageProps) {
     setError('')
 
     try {
-      const response = await searchFlights(query)
+      const [response] = await Promise.all([searchFlights(query), waitForMinimumLoadingTime()])
       setResult(response)
+      window.localStorage.setItem(
+        LAST_AIRFARE_ROUTE_KEY,
+        JSON.stringify({ origin: query.origin, destination: query.destination }),
+      )
+      window.dispatchEvent(new CustomEvent('airfare-route-change', {
+        detail: { origin: query.origin, destination: query.destination },
+      }))
+      setSearchParams(
+        {
+          origin: query.origin,
+          destination: query.destination,
+          departureDate: query.travelDate,
+          adults: String(query.adults),
+        },
+        { replace: true },
+      )
       window.requestAnimationFrame(() => {
         resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       })

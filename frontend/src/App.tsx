@@ -7,9 +7,8 @@ import { SearchPage } from '@/pages/SearchPage'
 import { AirfareIndexPage } from '@/pages/AirfareIndexPage'
 import { AnalyticsPage } from '@/pages/AnalyticsPage'
 import { DataExplorerPage } from '@/pages/DataExplorerPage'
-import { AdminPage } from '@/pages/AdminPage'
-import { AboutPage } from '@/pages/AboutPage'
 import { ResultsPage } from '@/pages/ResultsPage'
+import { LiveMapPage } from '@/pages/LiveMapPage'
 
 function AppShell() {
   const location = useLocation()
@@ -47,9 +46,8 @@ function AppShell() {
           <Route path="/index" element={<AirfareIndexPage theme={theme} />} />
           <Route path="/analytics" element={<AnalyticsPage theme={theme} />} />
           <Route path="/explorer" element={<DataExplorerPage theme={theme} />} />
-          <Route path="/admin" element={<AdminPage theme={theme} />} />
-          <Route path="/about" element={<AboutPage theme={theme} />} />
           <Route path="/results" element={<ResultsPage />} />
+          <Route path="/map" element={<LiveMapPage theme={theme} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

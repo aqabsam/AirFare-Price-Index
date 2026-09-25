@@ -1,4 +1,4 @@
-import { ArrowRight, BarChart3, BadgeIndianRupee, Database, Home, Info, PlaneTakeoff, Search, ShieldCheck } from 'lucide-react'
+import { ArrowRight, BarChart3, BadgeIndianRupee, Database, Home, PlaneTakeoff, Search, ShieldCheck } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 type FooterProps = {
@@ -83,8 +83,6 @@ export function Footer({ theme }: FooterProps) {
                   { to: '/index', label: 'Airfare Index', icon: PlaneTakeoff },
                   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
                   { to: '/explorer', label: 'Data Explorer', icon: Database },
-                  { to: '/admin', label: 'Admin', icon: ShieldCheck },
-                  { to: '/about', label: 'About', icon: Info },
                 ].map((item) => (
                   <Link
                     key={item.to}
@@ -131,7 +129,7 @@ export function Footer({ theme }: FooterProps) {
               </h2>
               <p className={`mt-4 max-w-xl text-sm leading-7 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
                 Built for fast route lookup with live backend pricing when available, plus clean navigation for
-                home, search, results, and about pages.
+                home, search, results, and analytics pages.
               </p>
 
               <div className="mt-6 grid gap-3 sm:grid-cols-3">
@@ -224,26 +222,6 @@ export function Footer({ theme }: FooterProps) {
                   >
                     Data Explorer
                   </Link>
-                  <Link
-                    to="/about"
-                    className={`rounded-2xl border px-4 py-4 text-sm font-medium transition hover:-translate-y-0.5 ${
-                      theme === 'dark'
-                        ? 'border-white/10 bg-white/5 text-white hover:bg-white/10'
-                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white'
-                    }`}
-                  >
-                    About
-                  </Link>
-                  <Link
-                    to="/admin"
-                    className={`rounded-2xl border px-4 py-4 text-sm font-medium transition hover:-translate-y-0.5 ${
-                      theme === 'dark'
-                        ? 'border-white/10 bg-white/5 text-white hover:bg-white/10'
-                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-white'
-                    }`}
-                  >
-                    Admin
-                  </Link>
                 </div>
 
                 <div className={`rounded-[28px] border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/50' : 'border-slate-200 bg-slate-50'}`}>
@@ -254,7 +232,7 @@ export function Footer({ theme }: FooterProps) {
                     {[
                       { label: 'Search', value: 'Open the route form' },
                       { label: 'Results', value: 'View live fare cards' },
-                      { label: 'About', value: 'Learn how the site works' },
+                      { label: 'Index', value: 'Track live route movement' },
                     ].map((item) => (
                       <div
                         key={item.label}

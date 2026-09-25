@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { FileJson2, FileSpreadsheet, Filter, SlidersHorizontal, Table2 } from 'lucide-react'
-import { fetchFareSnapshots } from '@/services/fareApi'
-import { RouteFilterPanel, type RouteFilterValue } from '@/components/RouteFilterPanel'
-import type { FareSnapshot } from '@/types/fare'
+import { fetchDataQuality, fetchFareExplorer } from '@/services/fareApi'
+import type { DataQualityResponse, FareExplorerResponse, FareSnapshot } from '@/types/fare'
 
 type DataExplorerPageProps = {
   theme: 'dark' | 'light'
@@ -17,30 +16,31 @@ function formatCurrency(value: number) {
 }
 
 function toTableRow(snapshot: FareSnapshot) {
+  const sourceStage = snapshot.collectionStage ?? (snapshot.sourceType === 'duffel' ? 'DUFFEL' : snapshot.sourceType === 'demo' || snapshot.sourceType === 'aggregated' ? 'DEMO' : 'SCRAPER')
   return {
     origin: snapshot.origin,
     destination: snapshot.destination,
     airline: snapshot.airline,
     date: snapshot.departureDate,
     fare: formatCurrency(snapshot.price),
+    source: sourceStage,
+    collectedAt: snapshot.collectedAt,
+    baseFare: snapshot.baseFare === null || snapshot.baseFare === undefined ? '—' : formatCurrency(snapshot.baseFare),
+    taxes: snapshot.taxes === null || snapshot.taxes === undefined ? '—' : formatCurrency(snapshot.taxes),
+    fees: formatCurrency((snapshot.taxes ?? 0) + (snapshot.udf ?? 0) + (snapshot.convenienceFee ?? 0)),
+    quality: snapshot.dataQualityScore === null || snapshot.dataQualityScore === undefined ? '—' : `${snapshot.dataQualityScore}%`,
   }
 }
-
 export function DataExplorerPage({ theme }: DataExplorerPageProps) {
   const [rows, setRows] = useState<FareSnapshot[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [draftFilters, setDraftFilters] = useState<RouteFilterValue>({
-    origin: '',
-    destination: '',
-    departureDate: '',
-  })
-  const [appliedFilters, setAppliedFilters] = useState<RouteFilterValue>({
-    origin: '',
-    destination: '',
-    departureDate: '',
-  })
-
+    const [quality, setQuality] = useState<DataQualityResponse | null>(null)
+    const [explorer, setExplorer] = useState<FareExplorerResponse | null>(null)
+  const [routeFilter, setRouteFilter] = useState('')
+  const [airlineFilter, setAirlineFilter] = useState('')
+  const [dateFilter, setDateFilter] = useState('')
+  const [maxPrice, setMaxPrice] = useState('')
   useEffect(() => {
     let active = true
 
@@ -49,9 +49,11 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
       setError('')
 
       try {
-        const data = await fetchFareSnapshots(appliedFilters)
+          const [explorerData, qualityData] = await Promise.all([fetchFareExplorer(), fetchDataQuality()])
         if (active) {
-          setRows(data)
+            setRows(explorerData.cleaned)
+          setQuality(qualityData)
+          setExplorer(explorerData)
         }
       } catch (error) {
         if (active) {
@@ -64,27 +66,46 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
       }
     }
 
+    const handleSync = () => {
+      void loadRows()
+    }
+
     void loadRows()
+    window.addEventListener('fare-data-sync', handleSync)
+    const refreshTimer = window.setInterval(() => {
+      void loadRows()
+    }, 30000)
 
     return () => {
       active = false
+      window.removeEventListener('fare-data-sync', handleSync)
+      window.clearInterval(refreshTimer)
     }
-  }, [appliedFilters])
+  }, [])
 
-  function applyFilters(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setAppliedFilters(draftFilters)
-  }
-
-  function clearFilters() {
-    const cleared = { origin: '', destination: '', departureDate: '' }
-    setDraftFilters(cleared)
-    setAppliedFilters(cleared)
-  }
-
-  const filteredRows = useMemo(() => rows, [rows])
+  const filteredRows = useMemo(() => rows.filter((row) => {
+    const route = `${row.origin}-${row.destination}`.toLowerCase()
+    return (!routeFilter || route.includes(routeFilter.toLowerCase())) &&
+      (!airlineFilter || row.airline.toLowerCase().includes(airlineFilter.toLowerCase())) &&
+      (!dateFilter || row.departureDate === dateFilter) &&
+      (!maxPrice || row.price <= Number(maxPrice))
+  }), [airlineFilter, dateFilter, maxPrice, routeFilter, rows])
 
   const uniqueRoutes = new Set(rows.map((row) => row.routeKey)).size
+
+  function downloadFile(format: 'csv' | 'json') {
+    const payload = format === 'json'
+      ? JSON.stringify(filteredRows, null, 2)
+      : [
+          'origin,destination,airline,flightNumber,departureDate,departureTime,arrivalTime,price,currency',
+          ...filteredRows.map((row) => [row.origin, row.destination, row.airline, row.flightNumber, row.departureDate, row.departureTime, row.arrivalTime, row.price, row.currency].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(',')),
+        ].join('\n')
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(new Blob([payload], { type: format === 'json' ? 'application/json' : 'text/csv' }))
+    link.download = `fare-snapshots.${format}`
+    link.click()
+    URL.revokeObjectURL(link.href)
+     }
 
   return (
     <section className={`py-10 ${theme === 'dark' ? 'bg-slate-950' : 'bg-slate-50'}`}>
@@ -107,17 +128,6 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                 same rows that feed search and analytics.
               </p>
 
-              <div className="mt-6">
-                <RouteFilterPanel
-                  value={draftFilters}
-                  onChange={setDraftFilters}
-                  onSubmit={applyFilters}
-                  onClear={clearFilters}
-                  theme={theme}
-                  submitLabel="Load route data"
-                />
-              </div>
-
               <div className="mt-6 flex flex-wrap gap-3">
                 {['Route', 'Airline', 'Date', 'Price band', 'Stops'].map((item) => (
                   <span
@@ -134,9 +144,15 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
 
               <div className="mt-6 grid gap-3 sm:grid-cols-3">
                 {[
-                  { label: 'Visible rows', value: String(filteredRows.length) },
-                  { label: 'Routes tracked', value: String(uniqueRoutes) },
-                  { label: 'Export formats', value: 'CSV / JSON' },
+                  { label: 'Visible rows', value: rows.length ? String(filteredRows.length) : '—' },
+                  { label: 'Routes tracked', value: rows.length ? String(uniqueRoutes) : '—' },
+                  { label: 'Outliers', value: quality ? String(quality.outlierRecords) : '—' },
+                  { label: 'Missing fields', value: quality ? String(quality.missingFieldRecords) : '—' },
+                  { label: 'Rejected', value: explorer ? String(explorer.rejected.length) : '—' },
+                  { label: 'Raw records', value: explorer ? String(explorer.raw.length) : '—' },
+                  { label: 'Cleaned records', value: explorer ? String(explorer.cleaned.length) : '—' },
+                  { label: 'Index history', value: explorer ? String(explorer.indexHistory?.length ?? 0) : '—' },
+                  { label: 'Collection', value: explorer?.collectionStatus.status ?? '—' },
                 ].map((item) => (
                   <div
                     key={item.label}
@@ -174,9 +190,7 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                   Active route filters
                 </span>
                 <div className={`mt-2 rounded-2xl border px-4 py-3 text-sm ${theme === 'dark' ? 'border-white/10 bg-slate-900/80 text-slate-300' : 'border-slate-200 bg-white text-slate-700'}`}>
-                  {appliedFilters.origin || appliedFilters.destination || appliedFilters.departureDate
-                    ? `${appliedFilters.origin || 'Any'} → ${appliedFilters.destination || 'Any'} on ${appliedFilters.departureDate || 'any date'}`
-                    : 'Showing the full collected dataset'}
+                  {rows.length ? `${filteredRows.length} of ${rows.length} collected records` : 'No collected data yet'}
                 </div>
               </label>
 
@@ -200,6 +214,7 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                     <button
                       key={item.label}
                       type="button"
+                      onClick={() => downloadFile(item.label.startsWith('CSV') ? 'csv' : 'json')}
                       className={`flex items-center gap-3 rounded-2xl border px-4 py-4 text-left text-sm font-semibold transition hover:-translate-y-0.5 ${
                         theme === 'dark'
                           ? 'border-white/10 bg-white/5 text-white hover:bg-white/10'
@@ -223,16 +238,10 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                   </p>
                 </div>
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  {['Route corridor', 'Price range', 'Carrier', 'Travel date'].map((item) => (
-                    <div
-                      key={item}
-                      className={`rounded-2xl border px-4 py-3 text-sm ${
-                        theme === 'dark' ? 'border-white/10 bg-white/5 text-slate-200' : 'border-slate-200 bg-slate-50 text-slate-700'
-                      }`}
-                    >
-                      {item}
-                    </div>
-                  ))}
+                  <input value={routeFilter} onChange={(event) => setRouteFilter(event.target.value)} placeholder="Route e.g. PAT-BOM" className="rounded-2xl border bg-transparent px-4 py-3 text-sm" />
+                  <input value={airlineFilter} onChange={(event) => setAirlineFilter(event.target.value)} placeholder="Airline" className="rounded-2xl border bg-transparent px-4 py-3 text-sm" />
+                  <input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} className="rounded-2xl border bg-transparent px-4 py-3 text-sm" />
+                  <input type="number" min="0" value={maxPrice} onChange={(event) => setMaxPrice(event.target.value)} placeholder="Max price (INR)" className="rounded-2xl border bg-transparent px-4 py-3 text-sm" />
                 </div>
               </div>
             </div>
@@ -272,7 +281,7 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
 
             <div className="mt-5 overflow-hidden rounded-[24px] border">
               <div
-                className={`grid grid-cols-5 gap-3 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] ${
+                className={`grid grid-cols-11 gap-3 px-4 py-3 text-xs font-semibold uppercase tracking-[0.18em] ${
                   theme === 'dark' ? 'border-white/10 bg-slate-900/80 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-500'
                 }`}
               >
@@ -281,6 +290,12 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                 <span>Airline</span>
                 <span>Date</span>
                 <span>Fare</span>
+                <span>Source</span>
+                <span>Collected</span>
+                <span>Base fare</span>
+                <span>Taxes</span>
+                <span>Fees</span>
+                <span>Quality</span>
               </div>
               {loading ? (
                 <div className={`px-4 py-8 text-sm ${theme === 'dark' ? 'bg-white/5 text-slate-300' : 'bg-white text-slate-600'}`}>
@@ -292,7 +307,7 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                   return (
                     <div
                       key={row.id}
-                      className={`grid grid-cols-5 gap-3 px-4 py-4 text-sm ${
+                      className={`grid grid-cols-11 gap-3 px-4 py-4 text-sm ${
                         theme === 'dark'
                           ? index % 2 === 0
                             ? 'bg-white/5'
@@ -307,15 +322,27 @@ export function DataExplorerPage({ theme }: DataExplorerPageProps) {
                       <span className="font-medium">{item.airline}</span>
                       <span className="font-medium">{item.date}</span>
                       <span className="font-medium">{item.fare}</span>
+                      <span className="font-medium">{item.source}</span>
+                      <span className="font-medium">{item.collectedAt}</span>
+                      <span className="font-medium">{item.baseFare}</span>
+                      <span className="font-medium">{item.taxes}</span>
+                      <span className="font-medium">{item.fees}</span>
+                      <span className="font-medium">{item.quality}</span>
                     </div>
                   )
                 })
               ) : (
                 <div className={`px-4 py-8 text-sm ${theme === 'dark' ? 'bg-white/5 text-slate-300' : 'bg-white text-slate-600'}`}>
-                  No fare records match the current filter.
+                  {rows.length ? 'No fare records match the current filters.' : 'No collected data yet.'}
                 </div>
               )}
             </div>
+            {explorer?.rejected.length ? (
+              <div className={`mt-5 rounded-2xl border p-4 text-sm ${theme === 'dark' ? 'border-rose-500/20 bg-rose-500/10 text-rose-100' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+                <p className="font-semibold">Rejected/outlier records: {explorer.rejected.length}</p>
+                <p className="mt-1">{explorer.rejected.slice(0, 3).map((record) => `${record.id}: ${record.rejectedReason ?? record.dataQualityStatus ?? 'rejected'}`).join(' • ')}</p>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

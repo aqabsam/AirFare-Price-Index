@@ -1,4 +1,4 @@
-import { ArrowRight, BarChart3, Info, PlaneTakeoff, Route, ShieldCheck, Workflow } from 'lucide-react'
+import { ArrowRight, BarChart3, PlaneTakeoff, Route, ShieldCheck, Workflow } from 'lucide-react'
 import terminalImg from '@/assets/airport-terminal.svg'
 import routeImg from '@/assets/aircraft-route.svg'
 import dashboardImg from '@/assets/data-dashboard.svg'
@@ -38,7 +38,7 @@ export function ProjectBrief({ theme }: ProjectBriefProps) {
   return (
     <main className="mx-auto w-full max-w-7xl px-4 pb-14 sm:px-6 lg:px-8">
       <section
-        id="about"
+        id="overview"
         className={`overflow-hidden rounded-[32px] border shadow-[0_18px_60px_rgba(15,23,42,0.08)] transition-all duration-300 ${
           theme === 'dark'
             ? 'border-white/10 bg-slate-950 text-white shadow-slate-950/20'
@@ -54,8 +54,8 @@ export function ProjectBrief({ theme }: ProjectBriefProps) {
                   : 'border-teal-300/30 bg-teal-100/70 text-teal-800'
               }`}
             >
-              <Info size={15} />
-              About the project
+              <Route size={15} />
+              Project overview
             </span>
 
             <div className="space-y-4">

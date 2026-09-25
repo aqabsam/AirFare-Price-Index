@@ -2,6 +2,7 @@ import { BadgeIndianRupee, Clock3, PlaneTakeoff, ScanSearch } from 'lucide-react
 import { AirlineMark } from '@/components/AirlineMark'
 import { getAirlineBrand, getAirlineBrandByCode } from '@/data/airlines'
 import type { FlightOffer, FlightSearchResult } from '@/types/flight'
+import airplaneImage from '../../../airpalne-removebg-preview.png'
 
 type FlightResultsProps = {
   result: FlightSearchResult | null
@@ -29,28 +30,8 @@ function formatCollectedAt(value: string) {
   }).format(parsed)
 }
 
-function getSeatLabel(seatsRemaining: number) {
-  if (seatsRemaining <= 0) {
-    return 'Sold out'
-  }
-
-  return `${seatsRemaining} seat${seatsRemaining === 1 ? '' : 's'} left`
-}
-
-function getSourceTypeLabel(sourceType: FlightOffer['sourceType']) {
-  if (sourceType === 'airline') {
-    return 'Airline source'
-  }
-
-  if (sourceType === 'ota') {
-    return 'OTA source'
-  }
-
-  return 'Aggregated source'
-}
-
 export function FlightResults({ result, loading = false, theme }: FlightResultsProps) {
-  if (loading && !result) {
+  if (loading) {
     return <LoadingState theme={theme} />
   }
 
@@ -72,10 +53,10 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             <ScanSearch size={22} />
           </div>
           <h2 className={`mt-4 text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-            No live flights found
+            {result.message ?? 'No matching flight offers were found for this search.'}
           </h2>
           <p className={`mt-2 text-sm ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
-            No live airline source returned fares for this route and date.
+            The search completed without any flights to display.
           </p>
         </div>
       </section>
@@ -99,6 +80,9 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
         timeStyle: 'short',
       }).format(new Date(latestCollectedAt))
     : 'Live check pending'
+  const availableAirlines = [...new Map(
+    result.offers.map((offer) => [offer.airlineCode || offer.airline, offer]),
+  ).values()]
 
   return (
     <section id="results" className="mx-auto w-full max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
@@ -109,16 +93,15 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             : 'border-slate-200/70 bg-white text-slate-950'
         }`}
       >
-        {loading ? (
+        {result.message ? (
           <div
-            className={`rounded-2xl border px-4 py-3 text-sm ${
-              theme === 'dark' ? 'border-white/10 bg-white/5 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600'
+            className={`rounded-[20px] border px-5 py-4 text-sm font-semibold ${
+              theme === 'dark' ? 'border-amber-300/20 bg-amber-300/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-900'
             }`}
           >
-            Checking live airline sources...
+            {result.message}
           </div>
         ) : null}
-
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
           <div className="space-y-4">
             <div
@@ -174,6 +157,38 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             />
             <Stat theme={theme} label="Travel date" value={result.travelDate || 'Select date'} />
             <Stat theme={theme} label="Last live check" value={latestCollectedLabel} />
+          </div>
+        </div>
+
+        <div
+          className={`rounded-[24px] border px-5 py-4 ${
+            theme === 'dark' ? 'border-white/10 bg-slate-900/70' : 'border-slate-200 bg-slate-50'
+          }`}
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-teal-200' : 'text-teal-700'}`}>
+                Available airlines
+              </p>
+              <p className={`mt-1 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
+                Carriers returned for this route and date
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {availableAirlines.map((offer) => {
+                const brand = getAirlineBrandByCode(offer.airlineCode) ?? getAirlineBrand(offer.airline)
+                return (
+                  <div
+                    key={offer.airlineCode || offer.airline}
+                    className={`rounded-2xl border px-3 py-2 ${
+                      theme === 'dark' ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'
+                    }`}
+                  >
+                    <AirlineMark airline={offer.airline} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
 
@@ -238,20 +253,6 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                     >
                       {cheapest.stops === 0 ? 'Non-stop' : `${cheapest.stops} stop${cheapest.stops > 1 ? 's' : ''}`}
                     </span>
-                    <span
-                      className={`inline-flex items-center gap-2 rounded-full px-3 py-2 shadow-sm ${
-                        theme === 'dark' ? 'bg-slate-800' : 'bg-white'
-                      }`}
-                    >
-                      {getSeatLabel(cheapest.seatsRemaining)}
-                    </span>
-                    <span
-                      className={`inline-flex items-center gap-2 rounded-full px-3 py-2 shadow-sm ${
-                        theme === 'dark' ? 'bg-slate-800' : 'bg-white'
-                      }`}
-                    >
-                      {getSourceTypeLabel(cheapest.sourceType)}
-                    </span>
                   </div>
                   <div className="mt-3">
                     <AirlineMark
@@ -260,11 +261,28 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                       logoUrl={cheapestBrand?.logoUrl}
                     />
                   </div>
+                  <div className="mt-3">
+                    <SourceBadge offer={cheapest} theme={theme} />
+                  </div>
                   <div className={`mt-4 grid gap-3 sm:grid-cols-2 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
-                    <InfoCard theme={theme} label="Seats observed" value={getSeatLabel(cheapest.seatsRemaining)} />
                     <InfoCard theme={theme} label="Collected at" value={formatCollectedAt(cheapest.collectedAt)} />
-                    <InfoCard theme={theme} label="Source" value={cheapest.source} />
                     <InfoCard theme={theme} label="Confidence" value={`${Math.round(cheapest.confidence * 100)}%`} />
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
+                    {[
+                      ['Base fare', cheapest.baseFare],
+                      ['Taxes', cheapest.taxes],
+                      ['UDF', cheapest.udf],
+                      ['Convenience', cheapest.convenienceFee],
+                      ['Total', cheapest.totalFare ?? cheapest.price],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className={`rounded-xl border px-3 py-2 ${theme === 'dark' ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'}`}>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{label}</p>
+                        <p className={`mt-1 text-sm font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
+                          {typeof value === 'number' ? formatPrice(value, cheapest.currency) : 'Unavailable'}
+                        </p>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -284,7 +302,18 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
           </div>
         ) : null}
 
-        <div className={`overflow-x-auto rounded-[24px] border ${theme === 'dark' ? 'border-white/10' : 'border-slate-200'}`}>
+        <div className="grid gap-3 md:hidden">
+          {result.offers.map((offer, index) => (
+            <FlightOfferCard
+              key={`mobile-${offer.offerId}`}
+              offer={offer}
+              theme={theme}
+              isCheapest={index === 0}
+            />
+          ))}
+        </div>
+
+        <div className={`hidden overflow-x-auto rounded-[24px] border md:block ${theme === 'dark' ? 'border-white/10' : 'border-slate-200'}`}>
           <table
             className={`min-w-[1120px] divide-y ${theme === 'dark' ? 'divide-slate-800 bg-slate-950' : 'divide-slate-200 bg-white'}`}
           >
@@ -296,8 +325,6 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                 <th className="px-5 py-4 font-semibold">Arrival</th>
                 <th className="px-5 py-4 font-semibold">Duration</th>
                 <th className="px-5 py-4 font-semibold">Stops</th>
-                <th className="px-5 py-4 font-semibold">Seats</th>
-                <th className="px-5 py-4 font-semibold">Source</th>
                 <th className="px-5 py-4 font-semibold">Updated</th>
                 <th className="px-5 py-4 font-semibold text-right">Price</th>
               </tr>
@@ -319,6 +346,71 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
         </div>
       </div>
     </section>
+  )
+}
+
+function FlightOfferCard({
+  offer,
+  theme,
+  isCheapest,
+}: {
+  offer: FlightOffer
+  theme: 'dark' | 'light'
+  isCheapest: boolean
+}) {
+  const brand = getAirlineBrandByCode(offer.airlineCode) ?? getAirlineBrand(offer.airline)
+  const airlineName = brand?.airline ?? offer.airline
+
+  return (
+    <article
+      className={`rounded-[24px] border p-4 shadow-sm ${
+        isCheapest
+          ? theme === 'dark'
+            ? 'border-teal-300/40 bg-teal-300/10'
+            : 'border-teal-300 bg-teal-50/70'
+          : theme === 'dark'
+            ? 'border-white/10 bg-slate-900/80'
+            : 'border-slate-200 bg-white'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col items-start gap-2">
+          <AirlineMark airline={airlineName} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
+          <SourceBadge offer={offer} theme={theme} />
+        </div>
+        <div className="text-right">
+          <p className={`text-xs font-semibold uppercase tracking-[0.16em] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
+            Fare
+          </p>
+          <p className={`mt-1 text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
+            {formatPrice(offer.price, offer.currency)}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <div>
+          <p className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>{offer.departureTime}</p>
+          <p className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>{offer.origin}</p>
+        </div>
+        <div className="min-w-0 flex-1 px-2 text-center">
+          <p className={`truncate text-xs font-semibold ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>{offer.duration}</p>
+          <div className={`my-2 border-t border-dashed ${theme === 'dark' ? 'border-teal-300/50' : 'border-teal-500/50'}`} />
+          <p className={`text-xs font-medium ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
+            {offer.stops === 0 ? 'Non-stop' : `${offer.stops} stop${offer.stops > 1 ? 's' : ''}`}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className={`text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>{offer.arrivalTime}</p>
+          <p className={`text-xs font-semibold ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>{offer.destination}</p>
+        </div>
+      </div>
+
+      <div className={`mt-4 flex items-center justify-between border-t pt-3 text-xs ${theme === 'dark' ? 'border-white/10 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+        <span>{offer.flightNumber}</span>
+        <span>{isCheapest ? 'Best price' : formatCollectedAt(offer.collectedAt)}</span>
+      </div>
+    </article>
   )
 }
 
@@ -347,7 +439,10 @@ function FlightRow({
       }
     >
       <td className="px-5 py-4">
-        <AirlineMark airline={airlineName} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
+        <div className="flex flex-col items-start gap-2">
+          <AirlineMark airline={airlineName} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
+          <SourceBadge offer={offer} theme={theme} />
+        </div>
       </td>
       <td className={`whitespace-nowrap px-5 py-4 text-sm font-semibold ${theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
         {offer.flightNumber}
@@ -365,23 +460,44 @@ function FlightRow({
         </span>
       </td>
       <td className={`whitespace-nowrap px-5 py-4 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-        {getSeatLabel(offer.seatsRemaining)}
-      </td>
-      <td className={`whitespace-nowrap px-5 py-4 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
-        <div className="max-w-[180px]">
-          <p className="truncate font-medium">{offer.source}</p>
-          <p className={`text-xs uppercase tracking-[0.18em] ${theme === 'dark' ? 'text-slate-500' : 'text-slate-500'}`}>
-            {getSourceTypeLabel(offer.sourceType)}
-          </p>
-        </div>
-      </td>
-      <td className={`whitespace-nowrap px-5 py-4 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
         {formatCollectedAt(offer.collectedAt)}
       </td>
       <td className={`whitespace-nowrap px-5 py-4 text-right text-lg font-semibold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
         {formatPrice(offer.price, offer.currency)}
       </td>
     </tr>
+  )
+}
+
+function getSourceLabel(offer: FlightOffer) {
+  if (offer.sourceType === 'duffel' || offer.source.trim().toLowerCase() === 'duffel api') {
+    return 'Duffel API'
+  }
+
+  if (offer.sourceType === 'demo' || offer.source.trim().toLowerCase() === 'demo data') {
+    return 'Demo Data (Fallback)'
+  }
+
+  return offer.source || 'Unknown source'
+}
+
+function SourceBadge({ offer, theme }: { offer: FlightOffer; theme: 'dark' | 'light' }) {
+  const label = getSourceLabel(offer)
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${
+        offer.sourceType === 'demo'
+          ? theme === 'dark'
+            ? 'bg-amber-300/15 text-amber-200'
+            : 'bg-amber-100 text-amber-800'
+          : theme === 'dark'
+            ? 'bg-teal-300/15 text-teal-200'
+            : 'bg-teal-100 text-teal-800'
+      }`}
+    >
+      {label}
+    </span>
   )
 }
 
@@ -425,7 +541,27 @@ function LoadingState({ theme }: { theme: 'dark' | 'light' }) {
           theme === 'dark' ? 'border-slate-200/10 bg-slate-950 text-white' : 'border-slate-200/70 bg-white text-slate-950'
         }`}
       >
-        <div className="h-5 w-40 animate-pulse rounded-full bg-slate-200/70" />
+        <div
+          className={`overflow-hidden rounded-[24px] border ${
+            theme === 'dark' ? 'border-teal-300/20 bg-teal-300/10' : 'border-teal-200 bg-teal-50'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className={`flight-loader-stage relative flex h-56 items-center overflow-hidden sm:h-64 ${theme === 'dark' ? 'bg-slate-900/60' : 'bg-white/70'}`}>
+            <div className="flight-loader-route absolute inset-x-8 top-1/2 border-t border-dashed border-teal-300/50" />
+            <img src={airplaneImage} alt="" aria-hidden="true" className="flight-loader-plane absolute h-40 w-64 object-contain sm:h-48 sm:w-80" />
+          </div>
+          <div className="flex items-center gap-3 px-5 py-4">
+            <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full ${theme === 'dark' ? 'bg-teal-300 text-slate-950' : 'bg-slate-950 text-white'}`}>
+              <PlaneTakeoff size={18} />
+            </div>
+            <div>
+              <p className={`text-sm font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Searching available flights</p>
+              <p className={`text-xs ${theme === 'dark' ? 'text-teal-100/70' : 'text-teal-800/70'}`}>Checking Duffel API and Demo Data for this route...</p>
+            </div>
+          </div>
+        </div>
         <div className="mt-6 grid gap-3 md:grid-cols-3">
           <div className="h-20 animate-pulse rounded-2xl bg-slate-200/60" />
           <div className="h-20 animate-pulse rounded-2xl bg-slate-200/60" />

@@ -5,9 +5,13 @@ import type {
   FareCollectionStatusResponse,
   FareSourceHealthResponse,
   FareRouteSummary,
+    DataQualityResponse,
   FareSnapshot,
   FareSnapshotsResponse,
   FareSummaryResponse,
+  DgcaBacktestResponse,
+  FareExplorerResponse,
+  FareIndexHistoryResponse,
 } from '@/types/fare'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
@@ -137,4 +141,19 @@ export async function fetchFareCollectionSnapshots() {
 
 export async function fetchFareSourceHealth(): Promise<FareSourceHealthResponse> {
   return getJson<FareSourceHealthResponse>('/api/admin/fare-sources/status')
+}
+export async function fetchDataQuality(): Promise<DataQualityResponse> {
+  return getJson<DataQualityResponse>('/api/fares/data-quality')
+}
+
+export async function fetchDgcaBacktest(): Promise<DgcaBacktestResponse> {
+  return getJson<DgcaBacktestResponse>('/api/fares/dgca-backtest?windowDays=30')
+}
+
+export async function fetchFareExplorer(): Promise<FareExplorerResponse> {
+  return getJson<FareExplorerResponse>('/api/fares/explorer')
+}
+
+export async function fetchFareIndexHistory(): Promise<FareIndexHistoryResponse> {
+  return getJson<FareIndexHistoryResponse>('/api/index/history')
 }

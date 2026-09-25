@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { BarChart3, Database, Home, Info, Menu, MoonStar, PlaneTakeoff, Search, ShieldCheck, SunMedium, X } from 'lucide-react'
+import { BarChart3, Database, Home, Menu, MoonStar, PlaneTakeoff, Search, SunMedium, X } from 'lucide-react'
 
 type NavbarProps = {
   theme: 'dark' | 'light'
@@ -15,8 +15,6 @@ export function Navbar({ theme, onToggleTheme }: NavbarProps) {
     { href: '/index', label: 'Airfare Index', icon: PlaneTakeoff },
     { href: '/analytics', label: 'Analytics', icon: BarChart3 },
     { href: '/explorer', label: 'Data Explorer', icon: Database },
-    { href: '/admin', label: 'Admin', icon: ShieldCheck },
-    { href: '/about', label: 'About', icon: Info },
   ]
 
   return (
