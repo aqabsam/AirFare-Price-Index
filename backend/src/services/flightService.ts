@@ -35,7 +35,7 @@ export function hasMatchingFlightCarrier(offer: NormalizedFlightOffer) {
   if (offer.segments?.length) {
     return offer.segments.every((segment) => {
       const flightNumber = segment.flightNumber.replace(/[\s-]/g, '').toUpperCase()
-      const airlineCode = segment.airlineCode.trim().toUpperCase()
+      const airlineCode = segment.flightNumberCarrierCode.trim().toUpperCase()
       return /^[A-Z0-9]{2,3}\d{2,5}$/.test(flightNumber) && flightNumber.startsWith(airlineCode)
     })
   }
@@ -308,11 +308,33 @@ export async function searchFlightsFromDuffel(
       validationSummary = summary
     })
     const rejections: Record<string, number> = {}
+    const diagnosticStages = {
+      normalized: duffelOffers.length,
+      liveDuffelMode: 0,
+      validProvenance: 0,
+      validIndianCarrier: 0,
+      validOfferFlightNumber: 0,
+      matchingOfferRoute: 0,
+      connectedSegmentRoute: 0,
+      validSegmentFlightNumbers: 0,
+      matchingItineraryFlightNumber: 0,
+      matchingDepartureDate: 0,
+      matchingSegmentSchedule: 0,
+      validScheduleFormat: 0,
+      validDurationAndStops: 0,
+      validFare: 0,
+    }
     const verifiedOffers = duffelOffers.flatMap((offer) => {
+      if (!offer.liveMode) {
+        recordRejection(rejections, 'non-live Duffel offer')
+        return []
+      }
+      diagnosticStages.liveDuffelMode += 1
       if (offer.sourceType !== 'duffel') {
         recordRejection(rejections, 'invalid Duffel source provenance')
         return []
       }
+      diagnosticStages.validProvenance += 1
       const segments = offer.segments ?? []
       const carriers = segments.length
         ? [...new Map(segments.map((segment) => [segment.airlineCode, verifiedIndianAirline(segment.airline, segment.airlineCode)])).values()]
@@ -321,46 +343,57 @@ export async function searchFlightsFromDuffel(
         recordRejection(rejections, 'invalid or non-Indian operating airline')
         return []
       }
+      diagnosticStages.validIndianCarrier += 1
       if (!hasMatchingFlightCarrier(offer)) {
         recordRejection(rejections, 'flight number carrier mismatch')
         return []
       }
+      diagnosticStages.validOfferFlightNumber += 1
       if (offer.origin !== origin || offer.destination !== destination) {
         recordRejection(rejections, 'route mismatch')
         return []
       }
+      diagnosticStages.matchingOfferRoute += 1
       if (segments[0]?.origin !== origin || segments.at(-1)?.destination !== destination || segments.some((segment, index) => index > 0 && segments[index - 1]?.destination !== segment.origin)) {
         recordRejection(rejections, 'segment route mismatch')
         return []
       }
-      if (segments.some((segment) => !hasMatchingFlightCarrier({ ...offer, airline: segment.airline, airlineCode: segment.airlineCode, flightNumber: segment.flightNumber, segments: undefined }))) {
+      diagnosticStages.connectedSegmentRoute += 1
+      if (segments.some((segment) => !hasMatchingFlightCarrier({ ...offer, airline: segment.airline, airlineCode: segment.flightNumberCarrierCode, flightNumber: segment.flightNumber, segments: undefined }))) {
         recordRejection(rejections, 'segment flight number mismatch')
         return []
       }
+      diagnosticStages.validSegmentFlightNumbers += 1
       if (offer.flightNumber !== segments.map((segment) => segment.flightNumber).join(' / ')) {
         recordRejection(rejections, 'itinerary flight number mismatch')
         return []
       }
+      diagnosticStages.matchingItineraryFlightNumber += 1
       if (offer.departureDate !== departureDate) {
         recordRejection(rejections, 'travel date mismatch')
         return []
       }
+      diagnosticStages.matchingDepartureDate += 1
       if (segments[0]?.departureDate !== departureDate || segments[0]?.departureTime !== offer.departureTime || segments.at(-1)?.arrivalTime !== offer.arrivalTime || offer.stops !== segments.length - 1) {
         recordRejection(rejections, 'segment schedule mismatch')
         return []
       }
+      diagnosticStages.matchingSegmentSchedule += 1
       if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(offer.departureTime) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(offer.arrivalTime)) {
         recordRejection(rejections, 'invalid schedule')
         return []
       }
+      diagnosticStages.validScheduleFormat += 1
       if (!/^\d+h\s+\d{2}m$/i.test(offer.duration) || !Number.isInteger(offer.stops) || offer.stops < 0) {
         recordRejection(rejections, 'invalid schedule')
         return []
       }
+      diagnosticStages.validDurationAndStops += 1
       if (!Number.isFinite(offer.price) || offer.price <= 0 || !offer.currency.trim()) {
         recordRejection(rejections, 'invalid fare')
         return []
       }
+      diagnosticStages.validFare += 1
       return [{
         ...offer,
         airline: [...new Set(segments.map((segment) => verifiedIndianAirline(segment.airline, segment.airlineCode)?.name ?? ''))].filter(Boolean).join(' / '),
@@ -379,7 +412,9 @@ export async function searchFlightsFromDuffel(
     for (const [reason, count] of Object.entries(rejections)) {
       combinedRejections[reason] = (combinedRejections[reason] ?? 0) + count
     }
-    const searchOffers = timestampSearchOffers(deduplicateOffers(verifiedOffers))
+    const uniqueOffers = deduplicateOffers(verifiedOffers)
+    const duplicateCount = verifiedOffers.length - uniqueOffers.length
+    const searchOffers = timestampSearchOffers(uniqueOffers)
     const countByCarrier = (offers: NormalizedFlightOffer[]) => {
       const counts: Record<string, number> = {}
       for (const offer of offers) {
@@ -400,18 +435,15 @@ export async function searchFlightsFromDuffel(
         .then(() => publishFlightOffers(searchOffers))
         .catch((error) => console.warn('Unable to publish verified flight search results', error))
     }
+    console.info(`[Flight Search] FILTER STAGES ${JSON.stringify({ ...diagnosticStages, passedAllValidation: diagnosticStages.validFare, duplicatesRemoved: duplicateCount, finalVerified: searchOffers.length })}`)
+    console.info(`[Flight Search] BACKEND REJECTIONS ${JSON.stringify(rejections)}`)
     console.info(`[Flight Search] Final merged result count=${searchOffers.length} source=duffel`)
     return searchOffers.length
       ? { offers: searchOffers, status: 'live_success' }
       : { offers: [], status: 'no_results', message: 'No flights available for this search.' }
   } catch (error) {
     console.warn(`[Duffel] FAILED: ${error instanceof Error ? error.message : String(error)}`)
-    console.info('[Duffel] Raw offers: 0')
-    console.info('[Duffel] Valid offers before airline filtering: 0')
-    console.info('[Duffel] Rejected offers: 0')
-    console.info('[Duffel] Verified offers: 0')
-    console.info('[Flight Search] Final merged result count=0 source=duffel')
-    return { offers: [], status: 'no_results', message: 'No flights available for this search.' }
+    return { offers: [], status: 'duffel_error_no_fallback', message: 'Live flight data is temporarily unavailable. Please try again.' }
   }
 }
 

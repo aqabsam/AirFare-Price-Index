@@ -144,6 +144,7 @@ test('normal Flight Search uses Duffel directly with the exact route, date, and 
         onRawOfferCount?.(1)
         const normalizedOffer = normalizeDuffelOffer({
           id: 'offer-secret-provider-id',
+          live_mode: true,
           total_amount: '5200',
           total_currency: 'INR',
           slices: [{
@@ -168,7 +169,7 @@ test('normal Flight Search uses Duffel directly with the exact route, date, and 
     assert.equal(result.offers.length, 1)
     assert.equal(result.offers[0]?.airline, 'IndiGo')
     assert.equal(result.offers[0]?.sourceType, 'airline')
-    assert.equal(result.offers[0]?.liveMode, false)
+    assert.equal(result.offers[0]?.liveMode, true)
     assert.equal(result.offers[0]?.offerId, 'DEL-BLR-2026-09-26-6E1234-08:00')
     assert.equal(result.offers[0]?.source, 'Verified flight offer')
     assert.equal(JSON.stringify(result).includes('offer-secret-provider-id'), false)
@@ -217,6 +218,59 @@ test('Duffel with zero verified offers returns the required no-flights message',
     else process.env.DUFFEL_ACCESS_TOKEN = originalAccessToken
     if (originalApiKey === undefined) delete process.env.DUFFEL_API_KEY
     else process.env.DUFFEL_API_KEY = originalApiKey
+  }
+})
+
+test('Duffel sandbox offers are rejected as non-live rather than reported as verified fares', async () => {
+  const originalAccessToken = process.env.DUFFEL_ACCESS_TOKEN
+  process.env.DUFFEL_ACCESS_TOKEN = 'duffel_live_unit_test'
+  try {
+    const sandboxOffer = normalizeDuffelOffer({
+      live_mode: false,
+      total_amount: '5100',
+      total_currency: 'INR',
+      slices: [{
+        origin: { iata_code: 'PAT' },
+        destination: { iata_code: 'BOM' },
+        segments: [{
+          origin: { iata_code: 'PAT' },
+          destination: { iata_code: 'BOM' },
+          operating_carrier: { name: 'IndiGo', iata_code: '6E', country_code: 'IN' },
+          marketing_carrier: { name: 'IndiGo', iata_code: '6E', country_code: 'IN' },
+          operating_carrier_flight_number: '2124',
+          marketing_carrier_flight_number: '2124',
+          departing_at: '2026-10-30T08:00:00+05:30',
+          arriving_at: '2026-10-30T10:15:00+05:30',
+        }],
+      }],
+    }, { origin: 'PAT', destination: 'BOM', departureDate: '2026-10-30', adults: 1 })
+
+    assert.ok(sandboxOffer)
+    const result = await searchFlightsFromDuffel(
+      { origin: 'PAT', destination: 'BOM', departureDate: '2026-10-30', adults: 1 },
+      async () => sandboxOffer ? [sandboxOffer] : [],
+    )
+    assert.equal(result.status, 'no_results')
+    assert.equal(result.offers.length, 0)
+  } finally {
+    if (originalAccessToken === undefined) delete process.env.DUFFEL_ACCESS_TOKEN
+    else process.env.DUFFEL_ACCESS_TOKEN = originalAccessToken
+  }
+})
+
+test('Duffel provider errors remain distinguishable from a successful empty search', async () => {
+  const originalAccessToken = process.env.DUFFEL_ACCESS_TOKEN
+  process.env.DUFFEL_ACCESS_TOKEN = 'duffel_live_unit_test'
+  try {
+    const result = await searchFlightsFromDuffel(
+      { origin: 'PAT', destination: 'BOM', departureDate: '2026-10-30', adults: 1 },
+      async () => { throw new Error('Duffel HTTP 401') },
+    )
+    assert.equal(result.status, 'duffel_error_no_fallback')
+    assert.equal(result.offers.length, 0)
+  } finally {
+    if (originalAccessToken === undefined) delete process.env.DUFFEL_ACCESS_TOKEN
+    else process.env.DUFFEL_ACCESS_TOKEN = originalAccessToken
   }
 })
 
@@ -362,6 +416,7 @@ test('Duffel preserves every leg through final verification and rejects slice/se
   const route = { origin: 'HYD', destination: 'BLR', departureDate: '2026-09-26', adults: 1 }
   const connection = normalizeDuffelOffer({
     id: 'ai2447-connection',
+    live_mode: true,
     total_amount: '7200',
     total_currency: 'INR',
     slices: [{
@@ -492,6 +547,7 @@ test('HYD to BOM search verifies every requested Indian carrier and logs airline
     const result = await searchFlightsFromDuffel(route, async (input, onRawOfferCount, onOfferValidation) => {
       const offers = carriers.map(([code, name], index) => normalizeDuffelOffer({
         id: `hyd-bom-${code}`,
+        live_mode: true,
         total_amount: String(4200 + index * 200),
         total_currency: 'INR',
         slices: [{
@@ -603,4 +659,52 @@ test('Duffel normalization falls back to complete marketing carrier fields', () 
   assert.equal(offer?.airline, 'IndiGo')
   assert.equal(offer?.airlineCode, '6E')
   assert.equal(offer?.flightNumber, '6E2124')
+})
+
+test('Duffel keeps operating and marketing carriers distinct and falls back to marketing flight number', async () => {
+  const originalAccessToken = process.env.DUFFEL_ACCESS_TOKEN
+  process.env.DUFFEL_ACCESS_TOKEN = 'duffel_live_unit_test'
+  const offer = normalizeDuffelOffer({
+    live_mode: true,
+    total_amount: '4200',
+    total_currency: 'INR',
+    slices: [{
+      origin: { iata_code: 'PAT' },
+      destination: { iata_code: 'BOM' },
+      segments: [{
+        origin: { iata_code: 'PAT' },
+        destination: { iata_code: 'BOM' },
+        operating_carrier: { name: 'Air India Express', iata_code: 'IX', country_code: 'IN' },
+        marketing_carrier: { name: 'Air India', iata_code: 'AI', country_code: 'IN' },
+        operating_carrier_flight_number: 'invalid',
+        marketing_carrier_flight_number: '865',
+        departing_at: '2026-10-30T08:00:00+05:30',
+        arriving_at: '2026-10-30T10:15:00+05:30',
+      }],
+    }],
+  }, { origin: 'PAT', destination: 'BOM', departureDate: '2026-10-30', adults: 1 })
+
+  assert.ok(offer)
+  assert.equal(offer?.segments?.[0]?.airline, 'Air India Express')
+  assert.equal(offer?.segments?.[0]?.airlineCode, 'IX')
+  assert.equal(offer?.segments?.[0]?.operatingAirlineCode, 'IX')
+  assert.equal(offer?.segments?.[0]?.marketingAirlineCode, 'AI')
+  assert.equal(offer?.segments?.[0]?.flightNumber, 'AI865')
+  assert.equal(offer?.segments?.[0]?.flightNumberCarrierCode, 'AI')
+
+  try {
+    const result = await searchFlightsFromDuffel(
+      { origin: 'PAT', destination: 'BOM', departureDate: '2026-10-30', adults: 1 },
+      async () => offer ? [offer] : [],
+    )
+    assert.equal(result.status, 'live_success')
+    assert.equal(result.offers[0]?.airline, 'Air India Express')
+    assert.equal(result.offers[0]?.airlineCode, 'IX')
+    assert.equal(result.offers[0]?.flightNumber, 'AI865')
+    assert.equal(result.offers[0]?.segments?.[0]?.marketingAirlineCode, 'AI')
+    assert.equal(result.offers[0]?.segments?.[0]?.operatingAirlineCode, 'IX')
+  } finally {
+    if (originalAccessToken === undefined) delete process.env.DUFFEL_ACCESS_TOKEN
+    else process.env.DUFFEL_ACCESS_TOKEN = originalAccessToken
+  }
 })

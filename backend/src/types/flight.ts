@@ -12,6 +12,7 @@ export type NormalizedFlightSegment = {
   marketingAirlineCode: string | null
   operatingAirline: string | null
   operatingAirlineCode: string | null
+  flightNumberCarrierCode: string
   carrierCountryCode: string | null
   logoUrl: string | null
   flightNumber: string
