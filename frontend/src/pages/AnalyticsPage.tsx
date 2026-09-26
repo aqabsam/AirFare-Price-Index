@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Activity,
   ArrowDownRight,
@@ -26,6 +26,7 @@ import {
   Pie,
   PieChart,
   ResponsiveContainer,
+  ReferenceDot,
   Scatter,
   ScatterChart,
   Tooltip,
@@ -34,15 +35,14 @@ import {
   ZAxis,
 } from 'recharts'
 import { airlineDirectory } from '@/data/airlines'
-import { fetchDataQuality, fetchDgcaBacktest, fetchFareAnalytics, fetchFareSnapshots } from '@/services/fareApi'
+import { EmptyFareState } from '@/components/EmptyFareState'
+import { useSearchState } from '@/state/searchContext'
+import type { VerifiedFareObservation } from '@/state/searchContext'
+import demoData from '../../../backend/test.json'
 import type {
   DataQualityResponse,
-  DgcaBacktestResponse,
   FareAnalyticsResponse,
-  FareDailyIndexPoint,
   FareRouteSummary,
-  FareSnapshot,
-  FareTrendPoint,
 } from '@/types/fare'
 
 type AnalyticsPageProps = {
@@ -67,21 +67,6 @@ const emptyAnalytics: FareAnalyticsResponse = {
 }
 
 const chartPalette = ['#2dd4bf', '#fbbf24', '#60a5fa', '#a78bfa', '#f472b6', '#f97316', '#34d399', '#f59e0b']
-const fixedRouteOptions = [
-  { value: 'all', label: 'All' },
-  { value: 'CCU → PNQ', label: 'CCU→PNQ' },
-  { value: 'DEL → BLR', label: 'DEL→BLR' },
-  { value: 'HYD → COK', label: 'HYD→COK' },
-  { value: 'PAT → BOM', label: 'PAT→BOM' },
-]
-const fixedAirlineOptions = [
-  { value: 'all', label: 'All' },
-  { value: 'Air India', label: 'Air India' },
-  { value: 'Air India Express', label: 'Air India Express' },
-  { value: 'Akasa Air', label: 'Akasa Air' },
-  { value: 'IndiGo', label: 'IndiGo' },
-  { value: 'SpiceJet', label: 'SpiceJet' },
-]
 const maxPriceOptions = [
   { value: 'all', label: 'Any' },
   { value: '2000', label: '₹2k' },
@@ -91,28 +76,11 @@ const maxPriceOptions = [
   { value: '12000', label: '₹12k' },
 ]
 
-function formatDateKey(date: Date) {
-  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000)
-  return offsetDate.toISOString().slice(0, 10)
-}
-
-function buildDateRange(startDate: string, endDate: string) {
-  const start = new Date(`${startDate}T00:00:00`)
-  const end = new Date(`${endDate}T00:00:00`)
-  const dates: string[] = []
-
-  for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
-    dates.push(formatDateKey(cursor))
-  }
-
-  return dates
-}
-
 function formatCurrency(value: number) {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
     currency: 'INR',
-    maximumFractionDigits: 0,
+    maximumFractionDigits: 2,
   }).format(value)
 }
 
@@ -128,7 +96,8 @@ function moneyTooltipFormatter(
   value: number | string | readonly (number | string)[] | undefined,
   label = 'Avg fare',
 ) {
-  const numericValue = Array.isArray(value) ? Number(value[0] ?? 0) : Number(value ?? 0)
+  const numericValue = Array.isArray(value) ? Number(value[0]) : Number(value)
+  if (!Number.isFinite(numericValue)) return ['Insufficient verified observations', label] as [string, string]
   return [formatCurrency(numericValue), label] as [string, string]
 }
 
@@ -138,14 +107,6 @@ function average(values: number[]) {
   }
 
   return values.reduce((sum, value) => sum + value, 0) / values.length
-}
-
-function sortTrend(left: FareTrendPoint, right: FareTrendPoint) {
-  return left.bookingWindowDays - right.bookingWindowDays
-}
-
-function sortDaily(left: FareDailyIndexPoint, right: FareDailyIndexPoint) {
-  return left.collectionDate.localeCompare(right.collectionDate)
 }
 
 function calculateRegression(values: Array<{ x: number; y: number }>) {
@@ -167,104 +128,69 @@ function calculateRegression(values: Array<{ x: number; y: number }>) {
     .map((x) => ({ x, y: slope * x + intercept }))
 }
 
+type FareHistoryPoint = {
+  date: string
+  fare: number
+  count: number
+}
+
+function groupFareHistoryByDate(observations: VerifiedFareObservation[]) {
+  const groups = new Map<string, number[]>()
+  observations.forEach((observation) => {
+    const date = observation.collectedAt.slice(0, 10)
+    const fares = groups.get(date) ?? []
+    fares.push(observation.fare)
+    groups.set(date, fares)
+  })
+  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, fares]) => ({
+    date,
+    average: average(fares),
+    count: fares.length,
+  }))
+}
+
+function movementAtWindow(dailyAverages: Array<{ date: string; average: number; count: number }>, windowDays: number) {
+  const first = dailyAverages[0]
+  if (!first || dailyAverages.length < 2) return null
+  const target = new Date(`${first.date}T00:00:00Z`).getTime() + windowDays * 86_400_000
+  const comparison = dailyAverages.find((point) => new Date(`${point.date}T00:00:00Z`).getTime() >= target)
+  return comparison ? comparison.average - first.average : null
+}
+
 export function AnalyticsPage({ theme }: AnalyticsPageProps) {
-  const [analytics, setAnalytics] = useState<FareAnalyticsResponse>(emptyAnalytics)
-  const [snapshots, setSnapshots] = useState<FareSnapshot[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [quality, setQuality] = useState<DataQualityResponse | null>(null)
-  const [backtest, setBacktest] = useState<DgcaBacktestResponse | null>(null)
+  const search = useSearchState()
+  const fareHistoryObservations = search.fareHistoryObservations
+  const activeSearch = search.data
+  const hasSuccessfulSearch = Boolean(activeSearch && ['live_success', 'duffel_success'].includes(activeSearch.result.status) && activeSearch.result.offers.length)
+  const analytics = search.data?.analytics ?? emptyAnalytics
+  const snapshots = search.data?.snapshots ?? []
+  const loading = search.loading
+  const error = search.error
+  const quality: DataQualityResponse | null = search.data?.quality ?? null
   const [filters, setFilters] = useState<FilterState>({ route: 'all', airline: 'all', date: 'all', maxPrice: 'all' })
 
-  useEffect(() => {
-    let active = true
-
-    async function loadAnalytics() {
-      setLoading(true)
-      setError('')
-
-      try {
-        const [data, qualityData, backtestData, snapshotData] = await Promise.all([
-          fetchFareAnalytics(),
-          fetchDataQuality(),
-          fetchDgcaBacktest(),
-          fetchFareSnapshots(),
-        ])
-
-        if (active) {
-          setAnalytics({
-            summary: data.summary ?? [],
-            trends: data.trends ?? [],
-            dailyIndex: data.dailyIndex ?? [],
-            weeklyIndex: data.weeklyIndex ?? [],
-            monthlyIndex: data.monthlyIndex ?? [],
-            heatmap: data.heatmap ?? [],
-            sourceComparison: data.sourceComparison ?? [],
-          })
-          setSnapshots(snapshotData)
-          setQuality(qualityData)
-          setBacktest(backtestData)
-        }
-      } catch (loadError) {
-        if (active) {
-          setError(loadError instanceof Error ? loadError.message : 'Unable to load analytics data.')
-          setAnalytics(emptyAnalytics)
-          setSnapshots([])
-        }
-      } finally {
-        if (active) {
-          setLoading(false)
-        }
-      }
-    }
-
-    const handleSync = () => {
-      void loadAnalytics()
-    }
-
-    void loadAnalytics()
-    window.addEventListener('fare-data-sync', handleSync)
-    const refreshTimer = window.setInterval(() => {
-      void loadAnalytics()
-    }, 30000)
-
-    return () => {
-      active = false
-      window.removeEventListener('fare-data-sync', handleSync)
-      window.clearInterval(refreshTimer)
-    }
-  }, [])
+  const routeObservations = useMemo(() => {
+    if (!hasSuccessfulSearch || !activeSearch) return []
+    return fareHistoryObservations.filter((observation) =>
+      observation.origin === activeSearch.input.origin &&
+      observation.destination === activeSearch.input.destination &&
+      observation.travelDate === activeSearch.input.travelDate,
+    )
+  }, [activeSearch, fareHistoryObservations, hasSuccessfulSearch])
 
   const routeOptions = useMemo(() => {
-    const routeSet = new Set<string>([
-      ...fixedRouteOptions.map((route) => route.value),
-      ...snapshots.map((snapshot) => `${snapshot.origin} → ${snapshot.destination}`),
-    ])
-
+    const routeSet = new Set(routeObservations.map((observation) => `${observation.origin} → ${observation.destination}`))
     return [{ value: 'all', label: 'All' }, ...[...routeSet].filter((route) => route !== 'all').sort().map((route) => ({ value: route, label: route }))]
-  }, [snapshots])
+  }, [routeObservations])
 
   const airlineOptions = useMemo(
-    () =>
-      [...new Map(
-        [...fixedAirlineOptions, ...[...new Set(snapshots.map((snapshot) => snapshot.airline))].sort().map((airline) => ({ value: airline, label: airline }))].map((option) => [option.value, option]),
-      ).values()],
-    [snapshots],
+    () => [{ value: 'all', label: 'All' }, ...[...new Set(routeObservations.map((observation) => observation.airline))].sort().map((airline) => ({ value: airline, label: airline }))],
+    [routeObservations],
   )
 
   const dateOptions = useMemo(() => {
-    const snapshotDates = [...new Set(snapshots.map((snapshot) => snapshot.departureDate))].sort((left, right) => left.localeCompare(right))
-    const today = formatDateKey(new Date())
-
-    if (!snapshotDates.length) {
-      return [today]
-    }
-
-    const startDate = snapshotDates[0]
-    const endDate = snapshotDates[snapshotDates.length - 1]
-    const range = buildDateRange(startDate, endDate > today ? today : endDate)
-    return [...new Set([...range, ...snapshotDates])].sort((left, right) => left.localeCompare(right))
-  }, [snapshots])
+    return [...new Set(routeObservations.map((observation) => observation.travelDate))].sort((left, right) => left.localeCompare(right))
+  }, [routeObservations])
 
   const normalizedRoute = routeOptions.some((option) => option.value === filters.route) ? filters.route : 'all'
   const normalizedAirline = airlineOptions.some((option) => option.value === filters.airline) ? filters.airline : 'all'
@@ -300,58 +226,73 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
     })
   }, [snapshots, effectiveFilters])
 
+  const filteredFareObservations = useMemo(() => routeObservations.filter((observation) => {
+    if (effectiveFilters.route !== 'all' && `${observation.origin} → ${observation.destination}` !== effectiveFilters.route) return false
+    if (effectiveFilters.airline !== 'all' && observation.airline !== effectiveFilters.airline) return false
+    if (effectiveFilters.date !== 'all' && observation.travelDate !== effectiveFilters.date) return false
+    if (effectiveFilters.maxPrice !== 'all' && observation.fare > Number(effectiveFilters.maxPrice)) return false
+    return true
+  }).sort((left, right) => left.collectedAt.localeCompare(right.collectedAt)), [effectiveFilters, routeObservations])
+
+  const fareHistoryDailyAverages = useMemo(() => groupFareHistoryByDate(filteredFareObservations), [filteredFareObservations])
+  const fareHistorySeries = useMemo<FareHistoryPoint[]>(() => fareHistoryDailyAverages.map(({ date, average, count }) => ({ date, fare: average, count })), [fareHistoryDailyAverages])
+
   const summaryMetrics = useMemo(() => {
-    const allPrices = filteredSnapshots.map((snapshot) => snapshot.price)
+    const allPrices = filteredFareObservations.map((observation) => observation.fare)
     const currentLowest = allPrices.length ? Math.min(...allPrices) : 0
     const currentHighest = allPrices.length ? Math.max(...allPrices) : 0
     const currentAverage = allPrices.length ? average(allPrices) : 0
 
     return {
-      totalFlights: filteredSnapshots.length,
-      routeCount: new Set(filteredSnapshots.map((snapshot) => `${snapshot.origin} → ${snapshot.destination}`)).size,
-      airlineCount: new Set(filteredSnapshots.map((snapshot) => snapshot.airline)).size,
+      totalFlights: filteredFareObservations.length,
+      routeCount: new Set(filteredFareObservations.map((observation) => `${observation.origin} → ${observation.destination}`)).size,
+      airlineCount: new Set(filteredFareObservations.map((observation) => observation.airline)).size,
       currentLowest,
       currentHighest,
       currentAverage,
     }
-  }, [filteredSnapshots])
+  }, [filteredFareObservations])
 
-  const trendSeries = useMemo(() => {
-    if (filteredSnapshots.length) {
-      const grouped = new Map<string, { date: string; avg: number; count: number }>()
-
-      filteredSnapshots.forEach((snapshot) => {
-        const existing = grouped.get(snapshot.departureDate) ?? { date: snapshot.departureDate, avg: 0, count: 0 }
-        existing.avg += snapshot.price
-        existing.count += 1
-        grouped.set(snapshot.departureDate, existing)
-      })
-
-      return [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, value]) => ({
-        date,
-        price: Math.round(value.avg / value.count),
-      }))
+  const firstTrendValue = fareHistoryDailyAverages[0]?.average
+  const lastTrendValue = fareHistoryDailyAverages.at(-1)?.average
+  const priceChange = firstTrendValue !== undefined && lastTrendValue !== undefined && fareHistoryDailyAverages.length > 1 ? lastTrendValue - firstTrendValue : null
+  const pricePercentChange = priceChange !== null && firstTrendValue ? (priceChange / firstTrendValue) * 100 : null
+  const hasData = filteredFareObservations.length > 0
+  const noDataLabel = 'Insufficient verified observations'
+  const demoReferenceFare = demoData.leadTimeAnalysis.find((point) => point.window === 'T+1')?.averageFare ?? null
+  const trendWindowSummary = [1, 7, 15, 30, 45].map((windowDays) => {
+    const liveMovement = movementAtWindow(fareHistoryDailyAverages, windowDays)
+    const demoPoint = demoData.leadTimeAnalysis.find((point) => point.window === `T+${windowDays}`)
+    const isDemo = liveMovement === null && demoReferenceFare !== null && demoPoint !== undefined
+    const liveObservations = fareHistoryDailyAverages.filter((point) => {
+      const first = fareHistoryDailyAverages[0]
+      if (!first) return false
+      const elapsedDays = (Date.parse(`${point.date}T00:00:00Z`) - Date.parse(`${first.date}T00:00:00Z`)) / 86_400_000
+      return elapsedDays <= windowDays
+    }).reduce((count, point) => count + point.count, 0)
+    return {
+      windowDays,
+      movement: isDemo ? demoPoint.averageFare - demoReferenceFare : liveMovement,
+      observations: isDemo ? demoPoint.observations : liveObservations,
+      isDemo,
     }
-
-    return [...analytics.dailyIndex].sort(sortDaily).map((point) => ({
-      date: point.collectionDate,
-      price: point.averagePrice,
-    }))
-  }, [analytics.dailyIndex, filteredSnapshots])
-
-  const lastTrendValue = trendSeries[trendSeries.length - 1]?.price ?? 0
-  const firstTrendValue = trendSeries[0]?.price ?? lastTrendValue
-  const priceChange = lastTrendValue - firstTrendValue
-  const pricePercentChange = firstTrendValue ? (priceChange / firstTrendValue) * 100 : 0
-  const hasData = filteredSnapshots.length > 0
-  const noDataLabel = 'Not enough data'
+  })
+  const latestFarePoint = filteredFareObservations.at(-1)
+  const latestDailyPoint = fareHistorySeries.at(-1)
+  const fareAxisDomain = (() => {
+    if (!fareHistorySeries.length) return ['auto', 'auto'] as [string, string]
+    const values = fareHistorySeries.map((point) => point.fare)
+    const minimum = Math.min(...values)
+    const maximum = Math.max(...values)
+    const padding = Math.max((maximum - minimum) * 0.08, maximum * 0.015)
+    return [Math.max(Number.EPSILON, minimum - padding), maximum + padding] as [number, number]
+  })()
   const noDateDataLabel = effectiveFilters.date !== 'all' && !hasData ? 'No data available' : noDataLabel
 
   const currentLowestLabel = hasData ? formatCurrency(summaryMetrics.currentLowest) : noDateDataLabel
   const currentAverageLabel = hasData ? formatCurrency(summaryMetrics.currentAverage) : noDateDataLabel
   const currentHighestLabel = hasData ? formatCurrency(summaryMetrics.currentHighest) : noDateDataLabel
-  const priceDirection = priceChange >= 0 ? 'up' : 'down'
-  const priceColorClass = priceDirection === 'up' ? 'text-rose-500' : 'text-emerald-500'
+  const priceColorClass = priceChange === null ? 'text-slate-500' : priceChange >= 0 ? 'text-rose-500' : 'text-emerald-500'
 
   const SharedSelect = ({
     label,
@@ -442,39 +383,25 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
       .sort((left, right) => right.value - left.value)
   }, [filteredSnapshots])
 
-  const dateAverage = useMemo(() => {
-    const grouped = new Map<string, { date: string; average: number; flights: number }>()
-
-    filteredSnapshots.forEach((snapshot) => {
-      const item = grouped.get(snapshot.departureDate) ?? { date: snapshot.departureDate, average: 0, flights: 0 }
-      item.average += snapshot.price
-      item.flights += 1
-      grouped.set(snapshot.departureDate, item)
-    })
-
-    return [...grouped.values()]
-      .map((item) => ({
-        date: item.date,
-        average: Math.round(item.average / item.flights),
-        flights: item.flights,
-      }))
-      .sort((left, right) => left.date.localeCompare(right.date))
-  }, [filteredSnapshots])
+  const dateAverage = fareHistoryDailyAverages.map((item) => ({ date: item.date, average: item.average, flights: item.count }))
 
   const priceDistribution = useMemo(() => {
-    const buckets = [
-      { label: '₹0-2k', min: 0, max: 2000 },
-      { label: '₹2k-4k', min: 2000, max: 4000 },
-      { label: '₹4k-6k', min: 4000, max: 6000 },
-      { label: '₹6k-8k', min: 6000, max: 8000 },
-      { label: '₹8k+', min: 8000, max: Number.POSITIVE_INFINITY },
-    ]
-
-    return buckets.map((bucket) => ({
-      name: bucket.label,
-      count: filteredSnapshots.filter((snapshot) => snapshot.price >= bucket.min && snapshot.price < bucket.max).length,
-    }))
-  }, [filteredSnapshots])
+    const fares = filteredFareObservations.map((observation) => observation.fare)
+    if (!fares.length) return []
+    const minimum = Math.min(...fares)
+    const maximum = Math.max(...fares)
+    if (minimum === maximum) return [{ name: formatCurrency(minimum), count: fares.length }]
+    const binCount = Math.min(8, Math.max(1, Math.ceil(Math.sqrt(fares.length))))
+    const width = (maximum - minimum) / binCount
+    return Array.from({ length: binCount }, (_, index) => {
+      const start = minimum + width * index
+      const end = index === binCount - 1 ? maximum : minimum + width * (index + 1)
+      return {
+        name: `${formatCurrency(start)}–${formatCurrency(end)}`,
+        count: fares.filter((fare) => fare >= start && (index === binCount - 1 ? fare <= end : fare < end)).length,
+      }
+    }).filter((bin) => bin.count > 0)
+  }, [filteredFareObservations])
 
   const durationScatter = useMemo(
     () =>
@@ -517,13 +444,15 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
     return [...analytics.summary].sort((left, right) => left.cheapestPrice - right.cheapestPrice).slice(0, 5)
   }, [analytics.summary])
 
-  const trendWindowSummary = useMemo(() => [...analytics.trends].sort(sortTrend), [analytics.trends])
-
   const renderNoData = (label = effectiveFilters.date !== 'all' ? 'No data available' : noDataLabel) => (
     <div className="grid h-full min-h-[220px] place-items-center rounded-2xl border border-dashed border-slate-300/80 px-4 text-center text-sm font-medium text-slate-500 dark:border-slate-700 dark:text-slate-400">
       {label}
     </div>
   )
+
+  if (!hasSuccessfulSearch) {
+    return <EmptyFareState theme={theme} />
+  }
 
   return (
     <section className={`min-h-screen py-10 ${theme === 'dark' ? 'bg-slate-950' : 'bg-slate-50'}`}>
@@ -587,18 +516,21 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
             <div className={`rounded-[28px] border p-5 ${theme === 'dark' ? 'border-white/10 bg-slate-900/60' : 'border-slate-200 bg-slate-50'}`}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
-                  <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-teal-200' : 'text-teal-700'}`}>Price history</p>
-                  <h2 className={`mt-2 text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Fare trend over time</h2>
+                  <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-teal-200' : 'text-teal-700'}`}>Verified live observations</p>
+                  <h2 className={`mt-2 text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Verified Fare</h2>
                 </div>
                 <div className={`rounded-full border px-3 py-1 text-sm font-semibold ${theme === 'dark' ? 'border-teal-300/30 bg-teal-300/10 text-teal-200' : 'border-teal-200 bg-teal-50 text-teal-700'}`}>
-                  {formatPercent(pricePercentChange)}
+                  Latest: {latestFarePoint ? formatCurrency(latestFarePoint.fare) : noDataLabel}
                 </div>
               </div>
+              <p className={`mt-2 text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
+                Average verified fare per collection date · {latestFarePoint ? `updated ${latestFarePoint.collectedAt}` : 'no observations'}
+              </p>
 
               <div className="mt-4 h-72">
-                {hasData ? (
+                {fareHistorySeries.length ? (
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={trendSeries} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                    <AreaChart data={fareHistorySeries} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
                       <defs>
                         <linearGradient id="priceGradient" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="0%" stopColor="#2dd4bf" stopOpacity={0.55} />
@@ -606,24 +538,30 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                         </linearGradient>
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
-                      <XAxis dataKey="date" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} axisLine={false} tickLine={false} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} axisLine={false} tickLine={false} />
+                      <XAxis dataKey="date" tickFormatter={(value: string) => new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(`${value}T00:00:00Z`))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} axisLine={false} tickLine={false} />
+                      <YAxis domain={fareAxisDomain} tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} axisLine={false} tickLine={false} />
                       <Tooltip
-                        formatter={(value) => moneyTooltipFormatter(value)}
-                        labelFormatter={(label) => `Date: ${label}`}
+                        cursor={{ stroke: theme === 'dark' ? '#f8fafc' : '#0f172a', strokeDasharray: '4 4' }}
+                        formatter={(value) => [formatCurrency(Number(value)), 'Average verified fare']}
+                        labelFormatter={(label, payload) => {
+                          const point = payload[0]?.payload as FareHistoryPoint | undefined
+                          return `${label} · ${point?.count ?? 0} verified offers`
+                        }}
                         contentStyle={{
                           borderRadius: 16,
                           border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)',
                           background: theme === 'dark' ? '#020617' : '#ffffff',
                         }}
                       />
-                      <Area type="monotone" dataKey="price" stroke="#2dd4bf" strokeWidth={3} fill="url(#priceGradient)" />
+                      <Area type="monotone" dataKey="fare" name="Average verified fare" stroke="#2dd4bf" strokeWidth={2.5} fill="url(#priceGradient)" activeDot={{ r: 6, stroke: '#f8fafc', strokeWidth: 2 }} />
+                      {latestDailyPoint ? <ReferenceDot x={latestDailyPoint.date} y={latestDailyPoint.fare} r={5} fill="#fbbf24" stroke="#0f172a" strokeWidth={2} /> : null}
                     </AreaChart>
                   </ResponsiveContainer>
                 ) : (
                   renderNoData()
                 )}
               </div>
+              {fareHistoryDailyAverages.length === 1 ? <p className={`mt-3 text-sm ${theme === 'dark' ? 'text-amber-200' : 'text-amber-800'}`}>More verified observations are required to display a trend.</p> : null}
             </div>
 
             <div className={`rounded-[28px] border p-5 ${theme === 'dark' ? 'border-white/10 bg-slate-900/60' : 'border-slate-200 bg-slate-50'}`}>
@@ -633,12 +571,12 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
               <div className={`mt-5 rounded-[24px] border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/60' : 'border-slate-200 bg-white'}`}>
                 <div className="flex items-center justify-between">
                   <span className={`text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>Change</span>
-                  <span className={`text-lg font-bold ${priceColorClass}`}>{formatCurrency(priceChange)}</span>
+                  <span className={`text-right text-sm font-bold ${priceColorClass}`}>{priceChange === null ? 'Insufficient verified observations' : formatCurrency(priceChange)}</span>
                 </div>
-                <div className={`mt-2 flex items-center gap-2 ${priceColorClass}`}>
+                {priceChange !== null ? <div className={`mt-2 flex items-center gap-2 ${priceColorClass}`}>
                   {priceChange >= 0 ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />}
                   <span className="text-sm font-semibold">{formatPercent(pricePercentChange)}</span>
-                </div>
+                </div> : null}
               </div>
 
               <div className="mt-5 space-y-3">
@@ -656,7 +594,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                 </div>
                 <div className="flex items-center justify-between text-sm">
                   <span className={theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}>Price spread</span>
-                  <strong>{formatCurrency(summaryMetrics.currentHighest - summaryMetrics.currentLowest)}</strong>
+                  <strong>{hasData ? formatCurrency(summaryMetrics.currentHighest - summaryMetrics.currentLowest) : noDataLabel}</strong>
                 </div>
               </div>
 
@@ -666,8 +604,8 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                   <strong>{quality?.cleanedRecords ?? '—'}</strong>
                 </div>
                 <div className="mt-2 flex items-center justify-between gap-3">
-                  <span>DGCA benchmark</span>
-                  <strong>{backtest?.available ? 'Live' : 'Pending'}</strong>
+                  <span>Verified observations</span>
+                  <strong>{filteredFareObservations.length}</strong>
                 </div>
               </div>
             </div>
@@ -685,7 +623,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <BarChart data={airlineComparison.slice(0, 8)} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis dataKey="airline" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 11 }} angle={-18} textAnchor="end" interval={0} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <Tooltip
                         formatter={(value) => moneyTooltipFormatter(value)}
                         contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }}
@@ -710,7 +648,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <BarChart data={routeComparison} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis dataKey="route" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 11 }} angle={-18} textAnchor="end" interval={0} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <Tooltip
                         formatter={(value) => moneyTooltipFormatter(value)}
                         contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }}
@@ -800,7 +738,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <LineChart data={dateAverage} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis dataKey="date" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 11 }} angle={-18} textAnchor="end" interval={0} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <Tooltip
                         formatter={(value) => moneyTooltipFormatter(value)}
                         contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }}
@@ -827,7 +765,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <ScatterChart margin={{ top: 10, right: 15, left: 0, bottom: 10 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis type="number" dataKey="x" name="Duration" unit=" min" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
-                      <YAxis type="number" dataKey="y" name="Price" tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis type="number" dataKey="y" name="Price" tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <ZAxis range={[60, 360]} dataKey="z" />
                       <Tooltip
                         cursor={{ strokeDasharray: '3 3' }}
@@ -861,7 +799,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <BarChart data={stopsVsPrice} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis dataKey="stops" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <Tooltip formatter={(value) => moneyTooltipFormatter(value)} contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }} />
                       <Bar dataKey="price" radius={[8, 8, 0, 0]} fill="#a78bfa" />
                     </BarChart>
@@ -885,7 +823,7 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
                     <LineChart data={regressionPlot} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
                       <XAxis dataKey="x" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
+                      <YAxis tickFormatter={(value) => formatCurrency(Number(value))} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
                       <Tooltip
                         formatter={(value) => moneyTooltipFormatter(value, 'Estimated fare')}
                         contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }}
@@ -899,37 +837,43 @@ export function AnalyticsPage({ theme }: AnalyticsPageProps) {
               </div>
             </div>
 
-            <div className={`rounded-[28px] border p-5 ${theme === 'dark' ? 'border-white/10 bg-slate-900/60' : 'border-slate-200 bg-slate-50'}`}>
+            <div className="min-w-0 lg:col-span-2">
               <div className="flex items-center gap-2">
                 <TrendingUp className={theme === 'dark' ? 'text-teal-200' : 'text-teal-700'} size={18} />
-                <h3 className={`text-lg font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Fare trend windows</h3>
+                <h3 className={`text-lg font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Fare movement windows</h3>
               </div>
-              <div className="mt-4 h-72">
-                {hasData ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={trendWindowSummary} margin={{ top: 8, right: 8, left: 0, bottom: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={theme === 'dark' ? '#334155' : '#cbd5e1'} />
-                      <XAxis dataKey="bookingWindowDays" tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
-                      <YAxis tickFormatter={(value) => `₹${Math.round(Number(value) / 1000)}k`} tick={{ fill: theme === 'dark' ? '#cbd5e1' : '#475569', fontSize: 12 }} />
-                      <Tooltip formatter={(value) => moneyTooltipFormatter(value)} contentStyle={{ borderRadius: 16, border: theme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.08)', background: theme === 'dark' ? '#020617' : '#ffffff' }} />
-                      <Line type="monotone" dataKey="averagePrice" stroke="#2dd4bf" strokeWidth={3} dot={{ r: 4 }} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                ) : (
-                  renderNoData()
-                )}
-              </div>
-              <div className="mt-4 grid grid-cols-5 gap-2 text-xs">
-                {[1, 7, 15, 30, 45].map((windowDays) => {
-                  const point = trendWindowSummary.find((item) => item.bookingWindowDays === windowDays)
-                  return (
-                    <div key={windowDays} className={`rounded-xl border px-2 py-2 text-center ${theme === 'dark' ? 'border-white/10 bg-slate-950/50' : 'border-slate-200 bg-white'}`}>
-                      <p className="font-semibold">T+{windowDays}</p>
-                      <p className={theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}>Elasticity</p>
-                      <p className="mt-1 font-bold">{point?.elasticity ?? '—'}</p>
+              <div className="mt-4 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5">
+                {trendWindowSummary.map(({ windowDays, movement, observations, isDemo }) => (
+                  <div
+                    key={windowDays}
+                    className={`flex min-h-[174px] min-w-0 flex-col rounded-lg border-t-2 p-4 shadow-sm ${
+                      movement === null
+                        ? theme === 'dark'
+                          ? 'border-t-slate-600 border-x border-b border-x-white/10 border-b-white/10 bg-slate-900/70'
+                          : 'border-t-slate-300 border-x border-b border-x-slate-200 border-b-slate-200 bg-white'
+                        : theme === 'dark'
+                          ? 'border-t-teal-300 border-x border-b border-x-white/10 border-b-white/10 bg-slate-900/70'
+                          : 'border-t-teal-600 border-x border-b border-x-slate-200 border-b-slate-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className={`text-lg font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>T+{windowDays}</p>
+                      <span className={`rounded-md px-2 py-1 text-[11px] font-semibold ${theme === 'dark' ? 'bg-white/5 text-slate-300' : 'bg-slate-100 text-slate-600'}`}>
+                        {isDemo ? 'Demo · ' : ''}{observations} {observations === 1 ? 'observation' : 'observations'}
+                      </span>
                     </div>
-                  )
-                })}
+                    <div className="mt-auto pt-6">
+                      <p className={`text-[11px] font-semibold uppercase ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>{isDemo ? 'Demo fare movement vs T+1' : 'Fare movement'}</p>
+                      <p className={`mt-2 break-words text-sm font-bold leading-5 ${
+                        movement === null
+                          ? theme === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                          : movement > 0 ? 'text-rose-500' : movement < 0 ? 'text-emerald-500' : theme === 'dark' ? 'text-slate-200' : 'text-slate-700'
+                      }`}>
+                        {movement === null ? 'Insufficient verified observations' : `${movement > 0 ? '+' : ''}${formatCurrency(movement)}`}
+                      </p>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>

@@ -12,6 +12,7 @@ export const airports: Airport[] = [
   { code: 'HYD', city: 'Hyderabad', name: 'Rajiv Gandhi International Airport', region: 'Telangana' },
   { code: 'MAA', city: 'Chennai', name: 'Chennai International Airport', region: 'Tamil Nadu' },
   { code: 'CCU', city: 'Kolkata', name: 'Netaji Subhas Chandra Bose International Airport', region: 'West Bengal' },
+  { code: 'COK', city: 'Kochi', name: 'Cochin International Airport', region: 'Kerala' },
   { code: 'AMD', city: 'Ahmedabad', name: 'Sardar Vallabhbhai Patel International Airport', region: 'Gujarat' },
   { code: 'ATQ', city: 'Amritsar', name: 'Sri Guru Ram Dass Jee International Airport', region: 'Punjab' },
   { code: 'DED', city: 'Dehradun', name: 'Jolly Grant Airport', region: 'Uttarakhand' },

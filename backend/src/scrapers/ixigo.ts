@@ -26,7 +26,8 @@ export function createIxigoScraper(): WebsiteScraper | null {
     buildSearchUrl: (input: FlightSearchRequest) => {
       const [y, m, d] = input.departureDate.split('-')
       const dateDDMMYYYY = `${d}${m}${y}`
-      return `https://www.ixigo.com/search/result/flight?from=${input.origin}&to=${input.destination}&date=${dateDDMMYYYY}&adults=${input.adults}&children=0&infants=0&class=e`
+      const configuredOrigin = new URL(url).origin
+      return `${configuredOrigin}/search/result/flight?from=${input.origin}&to=${input.destination}&date=${dateDDMMYYYY}&adults=${input.adults}&children=0&infants=0&class=e`
     },
   }
 

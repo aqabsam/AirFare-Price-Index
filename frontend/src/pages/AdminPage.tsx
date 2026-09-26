@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, RefreshCw, ShieldCheck, TimerReset } from 'lucide-react'
 import { fetchFareCollectionSnapshots, fetchFareCollectionStatus, fetchFareSourceHealth, runFareCollection } from '@/services/fareApi'
+import { hideProviderBrand } from '@/services/displayText'
 import type { FareCollectionStatus, FareSnapshot, FareSourceHealthResponse } from '@/types/fare'
 
 type AdminPageProps = {
@@ -63,7 +64,7 @@ export function AdminPage({ theme }: AdminPageProps) {
   }
 
   const visibleSnapshots = useMemo(() => snapshots.slice(0, 10), [snapshots])
-  const visibleSources = useMemo(() => sourceHealth?.sources.slice(0, 8) ?? [], [sourceHealth])
+  const visibleSources = useMemo(() => sourceHealth?.sources.filter((source) => source.sourceType !== 'duffel' && !source.name.toLowerCase().includes('duffel') && !source.url.toLowerCase().includes('duffel')).slice(0, 8) ?? [], [sourceHealth])
 
   return (
     <section className={`py-10 ${theme === 'dark' ? 'bg-slate-950' : 'bg-slate-50'}`}>
@@ -157,7 +158,7 @@ export function AdminPage({ theme }: AdminPageProps) {
 
               {error ? (
                 <div className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {error}
+                  {hideProviderBrand(error)}
                 </div>
               ) : null}
 
@@ -176,7 +177,7 @@ export function AdminPage({ theme }: AdminPageProps) {
                   Latest message
                 </p>
                 <p className={`mt-2 text-sm leading-7 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
-                  {status?.message ?? 'No collection has been run yet.'}
+                  {status?.message ? hideProviderBrand(status.message) : 'No collection has been run yet.'}
                 </p>
               </div>
             </div>
@@ -282,9 +283,6 @@ export function AdminPage({ theme }: AdminPageProps) {
                         dateStyle: 'medium',
                         timeStyle: 'short',
                       }).format(new Date(snapshot.collectedAt))}
-                    </p>
-                    <p className={`mt-1 text-xs ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
-                      Source: {snapshot.source} • {snapshot.sourceType}
                     </p>
                   </div>
                 ))

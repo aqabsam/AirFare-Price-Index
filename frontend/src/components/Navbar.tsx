@@ -14,7 +14,7 @@ export function Navbar({ theme, onToggleTheme }: NavbarProps) {
     { href: '/search', label: 'Search', icon: Search },
     { href: '/index', label: 'Airfare Index', icon: PlaneTakeoff },
     { href: '/analytics', label: 'Analytics', icon: BarChart3 },
-    { href: '/explorer', label: 'Data Explorer', icon: Database },
+    { href: '/data-explorer', label: 'Data Explorer', icon: Database },
   ]
 
   return (

@@ -26,7 +26,7 @@ export type FareSnapshot = {
   seatsRemaining: number
   soldOut?: boolean
   source: string
-  collectionStage?: 'SCRAPER' | 'DUFFEL' | 'DEMO'
+  collectionStage?: 'SEARCH' | 'SCRAPER' | 'DUFFEL' | 'DEMO'
   sourceType: 'airline' | 'ota' | 'duffel' | 'demo' | 'aggregated'
   confidence: number
   dataQualityScore?: number | null

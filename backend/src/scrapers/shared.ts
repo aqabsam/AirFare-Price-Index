@@ -1,9 +1,12 @@
 import type { Browser, Page } from 'playwright'
 import type { FareSnapshot } from '../types/fare.js'
 import type { FlightSearchRequest } from '../types/flight.js'
-import type { ScraperDefinition } from './types.js'
+import type { ScraperDefinition, ScraperRunResult } from './types.js'
 
-export const SOURCE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPER_TIMEOUT ?? '30000'))
+const configuredSourceTimeout = Number(process.env.SCRAPER_TIMEOUT ?? '12000')
+export const SOURCE_TIMEOUT_MS = Number.isFinite(configuredSourceTimeout)
+  ? Math.min(12_000, Math.max(3_000, configuredSourceTimeout))
+  : 12_000
 const IST_TIME_ZONE = 'Asia/Kolkata'
 
 export const KNOWN_AIRLINES: { name: string; code: string; matchers: RegExp[] }[] = [
@@ -27,7 +30,7 @@ export function routeKey(input: FlightSearchRequest) {
 
 export function numberFrom(value: string) {
   const parsed = Number(value.replace(/[^\d.]/g, ''))
-  return Number.isFinite(parsed) ? Math.round(parsed) : 0
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 export function labeledAmount(value: string, labels: string[]) {
@@ -66,15 +69,16 @@ export function parseTimes(text: string): { departure: string; arrival: string }
   }
 }
 
-export function parseFlightNumber(text: string, airlineCode: string, index: number): string {
-  const match = text.match(/\b([A-Z0-9]{2})\s?[-]?\s?(\d{3,4})\b/i)
-  if (match) {
-    const code = match[1].toUpperCase()
-    if (!['AM', 'PM', 'HR', 'CO', 'TO', 'IN', 'ON', 'IS', 'AT', 'OF'].includes(code)) {
-      return `${code}${match[2]}`
-    }
+export function parseFlightNumber(text: string, expectedAirlineCode: string): string | null {
+  const expectedCode = expectedAirlineCode.trim().toUpperCase()
+  if (!/^[A-Z0-9]{2,3}$/.test(expectedCode)) return null
+  const pattern = /\b([A-Z0-9]{2,3})\s*-?\s*(\d{2,5})\b/gi
+  for (const match of text.matchAll(pattern)) {
+    const code = match[1]?.toUpperCase()
+    const digits = match[2]
+    if (code === expectedCode && digits) return `${code}${digits}`
   }
-  return `${airlineCode}-${String(100 + index)}`
+  return null
 }
 
 export function parseAirline(text: string, fallbackAirline?: string, fallbackCode?: string) {
@@ -89,17 +93,17 @@ export function parseAirline(text: string, fallbackAirline?: string, fallbackCod
   }
 }
 
-export function stopsFrom(value: string) {
+export function stopsFrom(value: string): number | null {
   if (/non[- ]?stop|direct/i.test(value)) return 0
   const match = value.match(/(\d+)\s*stop/i)
-  return match ? parseInt(match[1], 10) : 0
+  return match ? parseInt(match[1], 10) : null
 }
 
 function matchesAny(value: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(value))
 }
 
-async function fillByHints(page: Page, patterns: RegExp[], value: string) {
+async function fillByHints(page: Page, patterns: RegExp[], value: string, fieldKind: 'origin' | 'destination' | 'date') {
   const fields = page.locator('input, textarea')
   for (let index = 0; index < await fields.count(); index += 1) {
     const field = fields.nth(index)
@@ -110,10 +114,17 @@ async function fillByHints(page: Page, patterns: RegExp[], value: string) {
       id: element.getAttribute('id') ?? '',
       type: element.getAttribute('type') ?? '',
     })).catch(() => null)
-    if (!metadata || !matchesAny(`${metadata.placeholder} ${metadata.aria} ${metadata.name} ${metadata.id}`.toLowerCase(), patterns)) continue
+    if (!metadata) continue
+    const hintText = `${metadata.placeholder} ${metadata.aria} ${metadata.name} ${metadata.id}`.toLowerCase()
+    const isDateField = metadata.type.toLowerCase() === 'date' || /calendar|journey date|travel date|departure date/i.test(hintText)
+    if (fieldKind === 'origin' && (isDateField || /destination|arrival|\bto\b/i.test(hintText))) continue
+    if (fieldKind === 'destination' && (isDateField || /origin|\bfrom\b/i.test(hintText))) continue
+    if (fieldKind === 'date' && /origin|destination|\bfrom\b|\bto\b/i.test(hintText) && !isDateField) continue
+    if (!matchesAny(hintText, patterns)) continue
     await field.fill(value).catch(() => undefined)
-    return
+    if (await field.inputValue().catch(() => '') === value) return true
   }
+  return false
 }
 
 async function submitByHints(page: Page, patterns: RegExp[]) {
@@ -124,28 +135,50 @@ async function submitByHints(page: Page, patterns: RegExp[]) {
     const aria = await control.getAttribute('aria-label').catch(() => '')
     if (matchesAny(`${text} ${aria}`.toLowerCase(), patterns)) {
       await control.click({ force: true }).catch(() => undefined)
-      return
+      return true
     }
   }
-  await page.keyboard.press('Enter').catch(() => undefined)
+  await page.keyboard.press('Enter').then(() => true).catch(() => false)
 }
 
-export function buildSnapshot(text: string, definition: ScraperDefinition, input: FlightSearchRequest, index: number): FareSnapshot | null {
+function countRejection(rejectionCounts: Record<string, number> | undefined, reason: string) {
+  if (rejectionCounts) rejectionCounts[reason] = (rejectionCounts[reason] ?? 0) + 1
+}
+
+export function buildSnapshot(
+  text: string,
+  definition: ScraperDefinition,
+  input: FlightSearchRequest,
+  index: number,
+  rejectionCounts?: Record<string, number>,
+): FareSnapshot | null {
+  const reject = (reason: string) => {
+    countRejection(rejectionCounts, reason)
+    return null
+  }
   const times = parseTimes(text)
+  if (!times) return reject('missing departure/arrival time')
   const priceMatch = text.match(/(?:₹|INR|Rs\.?)\s*([\d,]+(?:\.\d+)?)/i)
-  if (!priceMatch || !times) return null
+  if (!priceMatch) return reject('missing fare')
 
   const price = numberFrom(priceMatch[1] ?? '')
-  if (!price) return null
+  if (!price || price <= 0) return reject('invalid fare')
 
   const durationMinutes = durationFrom(text)
+  const stops = stopsFrom(text)
+  if (!durationMinutes) return reject('missing or unparseable duration')
+  if (stops === null) return reject('missing or unparseable stops')
   const baseFare = labeledAmount(text, ['base fare', 'base'])
   const taxes = labeledAmount(text, ['taxes', 'tax'])
   const udf = labeledAmount(text, ['udf', 'user development fee'])
   const convenienceFee = labeledAmount(text, ['convenience fee', 'convenience'])
 
   const { airline, code } = parseAirline(text, definition.airline, definition.airlineCode)
-  const number = parseFlightNumber(text, code, index)
+  const number = parseFlightNumber(text, definition.airlineCode ?? code)
+  if (!number) {
+    const candidate = text.match(/\b(?:6E|AI|IX|SG|QP|9I|S5|UK)\s*-?\s*\d{2,5}\b/i)
+    return reject(candidate ? 'flight number carrier mismatch' : 'missing flight number')
+  }
   const collectedAt = new Date().toISOString()
 
   return {
@@ -164,7 +197,7 @@ export function buildSnapshot(text: string, definition: ScraperDefinition, input
     departureTime: times.departure,
     arrivalTime: times.arrival,
     durationMinutes,
-    stops: stopsFrom(text),
+    stops,
     price,
     baseFare,
     taxes,
@@ -180,7 +213,7 @@ export function buildSnapshot(text: string, definition: ScraperDefinition, input
   }
 }
 
-export async function scrapeWebsite(browser: Browser, definition: ScraperDefinition, input: FlightSearchRequest): Promise<FareSnapshot[]> {
+export async function scrapeWebsite(browser: Browser, definition: ScraperDefinition, input: FlightSearchRequest): Promise<ScraperRunResult> {
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 768 },
@@ -188,43 +221,75 @@ export async function scrapeWebsite(browser: Browser, definition: ScraperDefinit
   }).catch(() => null)
 
   const page = context ? await context.newPage() : await browser.newPage()
+  const networkResponses: string[] = []
+  let pageStatus: number | null = null
+  page.on('response', (response) => {
+    const resourceType = response.request().resourceType()
+    if (resourceType !== 'xhr' && resourceType !== 'fetch') return
+    try {
+      networkResponses.push(`${response.status()} ${new URL(response.url()).pathname}`)
+    } catch {
+      networkResponses.push(`${response.status()} ${resourceType}`)
+    }
+  })
+
   try {
     const targetUrl = definition.buildSearchUrl ? definition.buildSearchUrl(input) : definition.url
 
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: SOURCE_TIMEOUT_MS })
+    const navigation = await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: SOURCE_TIMEOUT_MS })
+    pageStatus = navigation?.status() ?? null
+    if (pageStatus !== null && pageStatus >= 400) {
+      const target = new URL(targetUrl)
+      throw new Error(`HTTP ${pageStatus} loading ${target.origin}${target.pathname}`)
+    }
 
     if (!definition.buildSearchUrl) {
-      await fillByHints(page, definition.hints.origin, input.origin)
-      await fillByHints(page, definition.hints.destination, input.destination)
-      await fillByHints(page, definition.hints.date, input.departureDate)
-      await submitByHints(page, definition.hints.submit)
+      const originFilled = await fillByHints(page, definition.hints.origin, input.origin, 'origin')
+      const destinationFilled = await fillByHints(page, definition.hints.destination, input.destination, 'destination')
+      const dateFilled = await fillByHints(page, definition.hints.date, input.departureDate, 'date')
+      if (!originFilled || !destinationFilled || !dateFilled) {
+        const missing = [!originFilled && 'origin', !destinationFilled && 'destination', !dateFilled && 'date'].filter(Boolean)
+        throw new Error(`could not populate ${missing.join(', ')} search field${missing.length === 1 ? '' : 's'}`)
+      }
+      if (!await submitByHints(page, definition.hints.submit)) {
+        throw new Error('could not find a search control')
+      }
     }
 
     if (definition.extractSnapshots) {
-      return await definition.extractSnapshots(page, definition, input)
+      const extraction = await definition.extractSnapshots(page, definition, input)
+      return { ...extraction, pageStatus, networkResponses: [...new Set(networkResponses)].slice(0, 20) }
     }
 
     const cardSelector = definition.cardSelectors.join(', ')
     await page.waitForSelector(cardSelector, { timeout: SOURCE_TIMEOUT_MS }).catch(() => undefined)
-    await page.waitForTimeout(1500)
 
     const cards = page.locator(cardSelector)
     const count = await cards.count().catch(() => 0)
     const snapshots: FareSnapshot[] = []
+    const rejectionCounts: Record<string, number> = {}
 
     for (let index = 0; index < Math.min(count, 100); index += 1) {
       const text = await cards.nth(index).innerText().catch(() => '')
-      const snapshot = buildSnapshot(text, definition, input, index)
+      const snapshot = buildSnapshot(text, definition, input, index, rejectionCounts)
       if (snapshot) snapshots.push(snapshot)
     }
 
-    return snapshots
-  } catch (error) {
-    console.warn(`[Scraper: ${definition.name}] Scrape warning:`, error instanceof Error ? error.message : error)
-    if (error instanceof Error && (error.name === 'TimeoutError' || /timeout|timed out|aborted/i.test(error.message))) {
-      throw error
+    if (!count) rejectionCounts['no result cards found'] = 1
+    return {
+      snapshots,
+      candidateCount: count,
+      rejectionCounts,
+      pageStatus,
+      networkResponses: [...new Set(networkResponses)].slice(0, 20),
     }
-    return []
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    console.warn(`[Scraper: ${definition.name}] Scrape warning: ${reason}`)
+    if (networkResponses.length) {
+      console.info(`[Scraper: ${definition.name}] XHR/fetch before failure: ${[...new Set(networkResponses)].slice(0, 20).join(' | ')}`)
+    }
+    throw error
   } finally {
     await page.close().catch(() => undefined)
     if (context) await context.close().catch(() => undefined)

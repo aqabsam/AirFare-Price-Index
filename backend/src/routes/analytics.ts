@@ -5,9 +5,15 @@ import { calculateDataQuality } from '../services/dataQualityService.js'
 import { fareStore } from '../services/fareStore.js'
 import { getCollectionLogs } from '../services/collectionLogService.js'
 import { getFareCollectionStatus } from '../services/fareCollectionService.js'
+import { getDgcaAnalytics } from '../services/dgcaAnalyticsService.js'
+import { getCsvHistoricalAnalytics } from '../services/csvHistoricalAnalyticsService.js'
 
 export async function analyticsRoutes(fastify: FastifyInstance) {
   const readFilters = (request: { query: unknown }) => request.query as Record<string, string | undefined>
+
+  fastify.get('/api/dgca/analytics', async () => getDgcaAnalytics())
+
+  fastify.get('/api/historical/csv-analytics', async () => getCsvHistoricalAnalytics())
 
   fastify.get('/api/fares', async (request) => {
     const query = readFilters(request)
@@ -33,6 +39,15 @@ export async function analyticsRoutes(fastify: FastifyInstance) {
     })
 
     return { snapshots }
+  })
+
+  fastify.get('/api/fares/history', async (request) => {
+    const query = request.query as Record<string, string | undefined>
+    const requestedDays = Number(query.days ?? '30')
+    const days = Number.isFinite(requestedDays) ? Math.min(30, Math.max(1, Math.round(requestedDays))) : 30
+    const snapshots = fareStore.getHistoricalSnapshots(days)
+    const collectionDates = [...new Set(snapshots.map((snapshot) => snapshot.collectionDate ?? snapshot.collectedAt.slice(0, 10)))].sort()
+    return { days, collectionDates, snapshots }
   })
 
   fastify.get('/api/fares/routes', async (request) => {

@@ -27,7 +27,8 @@ export function createEaseMyTripScraper(): WebsiteScraper | null {
     buildSearchUrl: (input: FlightSearchRequest) => {
       const [y, m, d] = input.departureDate.split('-')
       const dateDMY = `${d}/${m}/${y}`
-      return `https://flight.easemytrip.com/FlightList/Index?srch=${input.origin}-${input.destination}-${dateDMY}&px=${input.adults}-0-0&cbn=0&ar=undefined&isSplitItinerary=false`
+      const configuredUrl = new URL(url)
+      return `${configuredUrl.origin}/FlightList/Index?srch=${input.origin}-${input.destination}-${dateDMY}&px=${input.adults}-0-0&cbn=0&ar=undefined&isSplitItinerary=false`
     },
   }
 

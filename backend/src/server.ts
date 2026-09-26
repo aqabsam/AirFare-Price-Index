@@ -7,6 +7,7 @@ import { analyticsRoutes } from './routes/analytics.js'
 import { flightsRoutes } from './routes/flights.js'
 import { fareStore } from './services/fareStore.js'
 import { startFareRefreshScheduler } from './jobs/fareRefresh.js'
+import { getDuffelAccessToken } from './providers/duffel.js'
 
 const app = fastify({
   logger: true,
@@ -18,6 +19,8 @@ const allowedOrigins = (process.env.CORS_ORIGINS ?? 'https://airfare-price.web.a
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean)
+
+console.info(`[Duffel] API key configured: ${Boolean(getDuffelAccessToken())}; base URL: ${(process.env.DUFFEL_API_BASE_URL?.trim() || 'https://api.duffel.com').replace(/\/$/, '')}`)
 
 async function isPortInUse(portNumber: number, hostName: string) {
   return await new Promise<boolean>((resolve) => {

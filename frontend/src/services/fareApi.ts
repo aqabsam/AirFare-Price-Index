@@ -6,15 +6,18 @@ import type {
   FareSourceHealthResponse,
   FareRouteSummary,
     DataQualityResponse,
+    DgcaAnalyticsResponse,
   FareSnapshot,
   FareSnapshotsResponse,
   FareSummaryResponse,
   DgcaBacktestResponse,
   FareExplorerResponse,
+  FareHistoryResponse,
   FareIndexHistoryResponse,
 } from '@/types/fare'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
+const API_TIMEOUT_MS = 8000
 
 function buildApiUrl(path: string) {
   if (!API_BASE_URL) {
@@ -25,7 +28,20 @@ function buildApiUrl(path: string) {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(buildApiUrl(path))
+  let response: Response
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS)
+  try {
+    response = await fetch(buildApiUrl(path), { signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Fare data request timed out. Please try again.')
+    }
+
+    throw new Error('Fare data is temporarily unavailable. Please check the API connection and try again.')
+  } finally {
+    window.clearTimeout(timeoutId)
+  }
   const payload = (await response.json().catch(() => null)) as T & { error?: string } | null
 
   if (!response.ok) {
@@ -54,6 +70,10 @@ export async function fetchFareSnapshots(filters?: {
   const suffix = search.toString() ? `?${search.toString()}` : ''
   const payload = await getJson<FareSnapshotsResponse>(`/api/fares/snapshots${suffix}`)
   return payload.snapshots ?? []
+}
+
+export async function fetchFareHistory(days = 30): Promise<FareHistoryResponse> {
+  return getJson<FareHistoryResponse>(`/api/fares/history?days=${Math.min(30, Math.max(1, Math.round(days)))}`)
 }
 
 export async function fetchFareSummary(filters?: {
@@ -148,6 +168,10 @@ export async function fetchDataQuality(): Promise<DataQualityResponse> {
 
 export async function fetchDgcaBacktest(): Promise<DgcaBacktestResponse> {
   return getJson<DgcaBacktestResponse>('/api/fares/dgca-backtest?windowDays=30')
+}
+
+export async function fetchDgcaAnalytics(): Promise<DgcaAnalyticsResponse> {
+  return getJson<DgcaAnalyticsResponse>('/api/dgca/analytics')
 }
 
 export async function fetchFareExplorer(): Promise<FareExplorerResponse> {

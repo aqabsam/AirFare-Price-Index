@@ -1,177 +1,93 @@
-import { useEffect, useMemo, useState } from 'react'
 import { MapPinned, PlaneTakeoff } from 'lucide-react'
-import { useSearchParams } from 'react-router-dom'
 import { RouteMap } from '@/components/RouteMap'
-import { fetchAirfareIndex } from '@/services/fareApi'
-import type { FareRouteSummary } from '@/types/fare'
+import { EmptyFareState } from '@/components/EmptyFareState'
+import { useSearchState } from '@/state/searchContext'
+import type { FlightOffer, FlightSearchInput } from '@/types/flight'
 
 type LiveMapPageProps = {
   theme: 'dark' | 'light'
 }
 
 function formatPrice(value: number, currency: string) {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency,
-    maximumFractionDigits: 0,
-  }).format(value)
+  return new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(value)
+}
+
+function offerMatchesSearch(offer: FlightOffer, input: FlightSearchInput) {
+  const segments = offer.segments ?? []
+  const totalFare = offer.totalFare
+  return offer.origin === input.origin && offer.destination === input.destination &&
+    segments.length > 0 && segments[0]?.origin === input.origin && segments.at(-1)?.destination === input.destination &&
+    segments.every((segment, index) => index === 0 || segments[index - 1]?.destination === segment.origin) &&
+    segments[0]?.departureDate === input.travelDate &&
+    offer.departureTime === segments[0]?.departureTime && offer.arrivalTime === segments.at(-1)?.arrivalTime &&
+    offer.stops === segments.length - 1 && segments.every((segment) => segment.airline.trim() && segment.airlineCode.trim() && segment.flightNumber.trim()) &&
+    Number.isFinite(totalFare) && (totalFare ?? 0) > 0 && Number.isFinite(Date.parse(offer.collectedAt))
 }
 
 export function LiveMapPage({ theme }: LiveMapPageProps) {
-  const [searchParams] = useSearchParams()
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [route, setRoute] = useState<FareRouteSummary | null>(null)
+  const { data } = useSearchState()
+  const input = data?.input
+  const successfulStatus = data && ['live_success', 'duffel_success'].includes(data.result.status)
+  const offers = successfulStatus && input ? data.result.offers.filter((offer) => offerMatchesSearch(offer, input)) : []
+  const currentOffer = offers[0]
+  const fare = currentOffer && typeof currentOffer.totalFare === 'number'
+    ? formatPrice(currentOffer.totalFare, currentOffer.currency)
+    : undefined
 
-  const query = useMemo(() => {
-    return {
-      origin: searchParams.get('origin') || 'PAT',
-      destination: searchParams.get('destination') || 'BOM',
-      departureDate: searchParams.get('departureDate') || searchParams.get('date') || undefined,
-    }
-  }, [searchParams])
-  const filters = useMemo(
-    () => ({
-      origin: searchParams.get('origin') || undefined,
-      destination: searchParams.get('destination') || undefined,
-      departureDate: searchParams.get('departureDate') || searchParams.get('date') || undefined,
-    }),
-    [searchParams],
-  )
+  if (!input || !currentOffer || !successfulStatus) {
+    return <EmptyFareState theme={theme} />
+  }
 
-  useEffect(() => {
-    let active = true
-
-    async function loadRoute() {
-      setLoading(true)
-      setError('')
-
-      try {
-        const result = await fetchAirfareIndex(filters)
-         if (active) {
-          const requestedRoute = result.routes.find(
-            (candidate) => candidate.origin === query.origin.toUpperCase() && candidate.destination === query.destination.toUpperCase(),
-          )
-          setRoute(requestedRoute ?? result.routes[0] ?? null)
-            }
-      } catch (searchError) {
-        if (active) {
-          setRoute(null)
-          setError(searchError instanceof Error ? searchError.message : 'Unable to load the selected route.')
-        }
-      } finally {
-        if (active) {
-          setLoading(false)
-        }
-      }
-    }
-
-    void loadRoute()
-    return () => {
-      active = false
-    }
-  }, [filters, query])
-
-  const origin = route?.origin ?? query.origin
-  const destination = route?.destination ?? query.destination
-  const routeTitle = `${origin} → ${destination}`
-  const airline = route?.topCarrier
-  const fare = route ? formatPrice(route.cheapestPrice, route.currency) : null
-   const summary = route ? `${airline} • ${fare}` : 'Waiting for verified fare data'
+  const routeLabel = `${input.origin} → ${input.destination}`
 
   return (
     <section className={`min-h-[70vh] py-10 ${theme === 'dark' ? 'bg-slate-950' : 'bg-slate-50'}`}>
       <div className="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className={`rounded-[32px] border shadow-[0_18px_60px_rgba(15,23,42,0.08)] ${theme === 'dark' ? 'border-white/10 bg-white/5 text-white' : 'border-slate-200/70 bg-white text-slate-950'}`}>
-          <div className="grid gap-8 p-6 lg:grid-cols-[0.9fr_1.1fr] lg:p-8 xl:p-10">
-            <div>
-              <p className={`text-sm font-semibold uppercase tracking-[0.24em] ${theme === 'dark' ? 'text-teal-200' : 'text-teal-700'}`}>
-                Live Map
-              </p>
-              <h1 className={`mt-3 text-4xl font-bold sm:text-5xl ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-                Route map for the selected flight search
-              </h1>
-              <p className={`mt-4 text-base leading-8 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
-                Real India geographic map with live airport pins, route connection, and fare details for the current search.
-                              </p>
+        <header className={`border-b pb-6 ${theme === 'dark' ? 'border-white/10' : 'border-slate-200'}`}>
+          <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-teal-200' : 'text-teal-700'}`}>Latest Verified Flight Search</p>
+          <h1 className={`mt-2 text-3xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Live Route Map</h1>
+          <p className={`mt-2 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>{routeLabel} · {input.travelDate}</p>
+        </header>
 
-              <div className="mt-6 space-y-3">
-                <div className={`rounded-2xl border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
-                  <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Route
-                  </p>
-                  <p className="mt-2 text-xl font-bold">{routeTitle}</p>
-                </div>
-
-                <div className={`rounded-2xl border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
-                  <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Current fare
-                  </p>
-                  <p className="mt-2 text-xl font-bold">{summary}</p>
-                </div>
-
-                <div className={`rounded-2xl border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
-                  <p className={`text-xs font-semibold uppercase tracking-[0.2em] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Airports
-                  </p>
-                  <p className="mt-2 text-sm leading-6">
-                    {origin} → {destination}
-                  </p>
-                </div>
-              </div>
+        <div className="mt-6 grid gap-6 lg:grid-cols-[0.75fr_1.25fr]">
+          <div className="space-y-3">
+            <div className={`border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-900/70 text-white' : 'border-slate-200 bg-white text-slate-950'}`}>
+              <p className="text-xs font-semibold uppercase text-slate-500">Searched route</p>
+              <p className="mt-2 text-xl font-bold">{routeLabel}</p>
+              <p className="mt-1 text-sm text-slate-500">Departure date: {input.travelDate}</p>
             </div>
-
-            <div className={`rounded-[28px] border p-4 ${theme === 'dark' ? 'border-white/10 bg-[#0b1b2b]' : 'border-slate-200 bg-[#edf7f7]'}`}>
-              {error ? (
-                <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {error}
-                </div>
-              ) : null}
-
-              <div className="relative overflow-hidden rounded-[24px] border border-teal-500/20 p-2">
-                <RouteMap origin={origin} destination={destination} theme={theme} routeLabel={routeTitle} airline={airline} fare={fare ?? undefined} />
-              </div>
-
-              <div className={`mt-4 rounded-2xl border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold ${theme === 'dark' ? 'border-white/10 bg-slate-950/60 text-white' : 'border-slate-200 bg-white text-slate-900'}`}>
-                    <MapPinned size={14} className="text-amber-300" />
-                    {origin}
-                  </div>
-                  <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold ${theme === 'dark' ? 'border-white/10 bg-slate-950/60 text-white' : 'border-slate-200 bg-white text-slate-900'}`}>
-                    <PlaneTakeoff size={14} className="text-teal-300" />
-                    {destination}
-                  </div>
-                </div>
-
-                <div className="mt-4 space-y-2 text-sm">
-                  <div className="flex justify-between gap-3">
-                    <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}>Airline</span>
-                    <span className="font-semibold">{airline ?? 'No verified fare data available'}</span>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}>Flight</span>
-                    <span className="font-semibold">{route ? 'Verified fare route' : 'No verified fare data available'}</span>
-                       </div>
-                  <div className="flex justify-between gap-3">
-                    <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}>Fare</span>
-                    <span className="font-semibold text-teal-500">{fare ?? 'No verified fare data available'}</span>
-                  </div>
-                </div>
-              </div>
-
-              {loading ? (
-                <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${theme === 'dark' ? 'border-white/10 bg-slate-950/60 text-slate-300' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                  Loading the selected route…
-                </div>
-              ) : null}
-
-              {!loading && !error && !route ? (
-                <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${theme === 'dark' ? 'border-rose-500/30 bg-rose-500/10 text-rose-200' : 'border-rose-200 bg-rose-50 text-rose-700'}`}>
-                  No verified fare data available
-                   </div>
-              ) : null}
+            <div className={`border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-900/70 text-white' : 'border-slate-200 bg-white text-slate-950'}`}>
+              <p className="text-xs font-semibold uppercase text-slate-500">Verified offers</p>
+              <p className="mt-2 text-xl font-bold">{offers.length}</p>
             </div>
+            <div className={`border p-4 ${theme === 'dark' ? 'border-white/10 bg-slate-900/70 text-white' : 'border-slate-200 bg-white text-slate-950'}`}>
+              <p className="text-xs font-semibold uppercase text-slate-500">Verified itinerary</p>
+              <p className="mt-2 text-lg font-bold">{currentOffer.airline}</p>
+              <p className="mt-1 text-sm">{currentOffer.flightNumber}</p>
+              <p className="mt-2 text-sm font-semibold">{currentOffer.departureTime} → {currentOffer.arrivalTime}</p>
+              <p className="mt-1 text-sm text-slate-500">{currentOffer.duration} · {currentOffer.stops === 0 ? 'Non-stop' : `${currentOffer.stops} stop${currentOffer.stops === 1 ? '' : 's'}`}</p>
+              {fare ? <p className="mt-3 text-lg font-bold text-teal-600 dark:text-teal-300">{fare}</p> : null}
+            </div>
+          </div>
+
+          <div className={`min-w-0 border p-3 ${theme === 'dark' ? 'border-white/10 bg-slate-900/70' : 'border-slate-200 bg-white'}`}>
+            <RouteMap
+              origin={input.origin}
+              destination={input.destination}
+              theme={theme}
+              routeLabel={routeLabel}
+              airline={currentOffer.airline}
+              flightNumber={currentOffer.flightNumber}
+              fare={fare}
+              travelDate={input.travelDate}
+              searchedAt={currentOffer.collectedAt}
+            />
+            <p className={`mt-3 flex items-center gap-2 text-sm ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
+              <MapPinned size={15} /> Route line connects the searched origin and destination.
+            </p>
+            <p className={`mt-2 flex items-center gap-2 text-sm ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
+              <PlaneTakeoff size={15} /> Flight details come from verified offers for this search.
+            </p>
           </div>
         </div>
       </div>

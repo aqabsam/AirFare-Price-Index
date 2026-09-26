@@ -50,14 +50,21 @@ export async function collectAndStoreFareSnapshots(trigger: FareCollectionStatus
   })
 
   activeRun = (async () => {
-    const log = startCollectionLog(trigger, 'SCRAPER -> DUFFEL -> DEMO')
+    const log = startCollectionLog(trigger, 'DUFFEL -> DEMO')
     try {
       const snapshots = await collectFareSnapshots()
       if (!snapshots.length) {
-        throw new Error('No live fares were collected. Configure real airline or OTA sources before running the pipeline.')
+        throw new Error('No verified Duffel fares were available for the tracked routes.')
       }
 
       const cleaning = cleanFareSnapshots(snapshots)
+      const rejectionCounts = cleaning.rejected.reduce<Record<string, number>>((counts, snapshot) => {
+        const reason = snapshot.rejectedReason ?? snapshot.dataQualityStatus ?? 'unknown'
+        counts[reason] = (counts[reason] ?? 0) + 1
+        return counts
+      }, {})
+      console.info(`[Fare Collection] Duffel snapshots=${snapshots.length}, cleaned=${cleaning.cleaned.length}, rejected=${cleaning.rejected.length}`)
+      console.info(`[Fare Collection] Rejection counts: ${Object.entries(rejectionCounts).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'}`)
       fareStore.replaceSnapshots(cleaning.cleaned, cleaning.rejected, snapshots)
       const analytics = calculateFareAnalytics()
       const calculatedAt = new Date().toISOString()

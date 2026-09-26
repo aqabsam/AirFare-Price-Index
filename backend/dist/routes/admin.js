@@ -1,6 +1,7 @@
 import { collectAndStoreFareSnapshots, getFareCollectionStatus } from '../services/fareCollectionService.js';
 import { calculateFareSourceHealth } from '../services/fareSourceHealthService.js';
 import { fareStore } from '../services/fareStore.js';
+import { getCollectionLogs } from '../services/collectionLogService.js';
 export async function adminRoutes(fastify) {
     fastify.get('/api/admin/fare-collection/status', async () => {
         const status = getFareCollectionStatus();
@@ -32,6 +33,7 @@ export async function adminRoutes(fastify) {
             snapshots: fareStore.getSnapshots(),
         };
     });
+    fastify.get('/api/admin/fare-collection/logs', async () => ({ logs: getCollectionLogs() }));
     fastify.get('/api/admin/fare-sources/status', async () => {
         return calculateFareSourceHealth();
     });

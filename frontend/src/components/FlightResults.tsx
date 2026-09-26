@@ -1,6 +1,7 @@
 import { BadgeIndianRupee, Clock3, PlaneTakeoff, ScanSearch } from 'lucide-react'
 import { AirlineMark } from '@/components/AirlineMark'
 import { getAirlineBrand, getAirlineBrandByCode } from '@/data/airlines'
+import { hideProviderBrand } from '@/services/displayText'
 import type { FlightOffer, FlightSearchResult } from '@/types/flight'
 import airplaneImage from '../../../airpalne-removebg-preview.png'
 
@@ -18,6 +19,12 @@ function formatPrice(price: number, currency: string) {
   }).format(price)
 }
 
+function formatTotalFare(offer: FlightOffer) {
+  return typeof offer.totalFare === 'number' && Number.isFinite(offer.totalFare) && offer.totalFare > 0
+    ? formatPrice(offer.totalFare, offer.currency)
+    : 'N/A'
+}
+
 function formatCollectedAt(value: string) {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) {
@@ -28,6 +35,13 @@ function formatCollectedAt(value: string) {
     dateStyle: 'medium',
     timeStyle: 'short',
   }).format(parsed)
+}
+
+function getOfferAirlines(offer: FlightOffer) {
+  const airlines = offer.segments?.length
+    ? offer.segments.map(({ airline, airlineCode }) => ({ airline, airlineCode }))
+    : [{ airline: offer.airline, airlineCode: offer.airlineCode }]
+  return [...new Map(airlines.map((airline) => [airline.airlineCode, airline])).values()]
 }
 
 export function FlightResults({ result, loading = false, theme }: FlightResultsProps) {
@@ -53,7 +67,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             <ScanSearch size={22} />
           </div>
           <h2 className={`mt-4 text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-            {result.message ?? 'No matching flight offers were found for this search.'}
+            {result.message ? hideProviderBrand(result.message) : 'No matching flight offers were found for this search.'}
           </h2>
           <p className={`mt-2 text-sm ${theme === 'dark' ? 'text-slate-400' : 'text-slate-600'}`}>
             The search completed without any flights to display.
@@ -64,7 +78,8 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
   }
 
   const cheapest = result.cheapestOffer
-  const cheapestBrand = cheapest ? getAirlineBrandByCode(cheapest.airlineCode) ?? getAirlineBrand(cheapest.airline) : undefined
+  const cheapestPrimaryAirline = cheapest ? getOfferAirlines(cheapest)[0] : undefined
+  const cheapestBrand = cheapestPrimaryAirline ? getAirlineBrandByCode(cheapestPrimaryAirline.airlineCode) ?? getAirlineBrand(cheapestPrimaryAirline.airline) : undefined
   const latestCollectedAt = result.offers.reduce((latest, offer) => {
     const collectedAt = new Date(offer.collectedAt).getTime()
     if (Number.isNaN(collectedAt)) {
@@ -81,7 +96,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
       }).format(new Date(latestCollectedAt))
     : 'Live check pending'
   const availableAirlines = [...new Map(
-    result.offers.map((offer) => [offer.airlineCode || offer.airline, offer]),
+    result.offers.flatMap(getOfferAirlines).map((airline) => [airline.airlineCode || airline.airline, airline]),
   ).values()]
 
   return (
@@ -99,7 +114,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
               theme === 'dark' ? 'border-amber-300/20 bg-amber-300/10 text-amber-100' : 'border-amber-200 bg-amber-50 text-amber-900'
             }`}
           >
-            {result.message}
+            {hideProviderBrand(result.message)}
           </div>
         ) : null}
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
@@ -210,7 +225,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                   {cheapestBrand?.logoUrl ? (
                     <img
                       src={cheapestBrand.logoUrl}
-                      alt={`${cheapest.airline} logo`}
+                      alt={`${cheapestPrimaryAirline?.airline ?? cheapest.airline} logo`}
                       className="h-10 w-10 rounded-full bg-white object-cover p-1"
                       loading="lazy"
                       referrerPolicy="no-referrer"
@@ -224,11 +239,11 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                     Cheapest airline
                   </p>
                   <h3 className={`mt-1 break-words text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-                    {cheapest.airline}{' '}
-                    <span className={theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}>
-                      ({cheapest.airlineCode})
-                    </span>
+                    {cheapest.airline}
                   </h3>
+                  <p className={`mt-1 text-sm font-semibold ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
+                    {cheapest.origin} → {cheapest.destination}
+                  </p>
                   <div className={`mt-2 flex flex-wrap gap-3 text-sm ${theme === 'dark' ? 'text-slate-200' : 'text-slate-700'}`}>
                     <span
                       className={`inline-flex items-center gap-2 rounded-full px-3 py-2 shadow-sm ${
@@ -236,7 +251,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                       }`}
                     >
                       <Clock3 size={14} />
-                      {cheapest.departureTime} - {cheapest.arrivalTime}
+                      Departure {cheapest.departureTime} · Arrival {cheapest.arrivalTime}
                     </span>
                     <span
                       className={`inline-flex items-center gap-2 rounded-full px-3 py-2 shadow-sm ${
@@ -255,34 +270,15 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                     </span>
                   </div>
                   <div className="mt-3">
-                    <AirlineMark
-                      airline={cheapest.airline}
-                      code={cheapest.airlineCode}
-                      logoUrl={cheapestBrand?.logoUrl}
-                    />
+                    <div className="flex flex-wrap gap-2">
+                      {getOfferAirlines(cheapest).map((airline) => {
+                        const brand = getAirlineBrandByCode(airline.airlineCode) ?? getAirlineBrand(airline.airline)
+                        return <AirlineMark key={airline.airlineCode} airline={airline.airline} code={airline.airlineCode} logoUrl={brand?.logoUrl} compact />
+                      })}
+                    </div>
                   </div>
-                  <div className="mt-3">
-                    <SourceBadge offer={cheapest} theme={theme} />
-                  </div>
-                  <div className={`mt-4 grid gap-3 sm:grid-cols-2 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
-                    <InfoCard theme={theme} label="Collected at" value={formatCollectedAt(cheapest.collectedAt)} />
-                    <InfoCard theme={theme} label="Confidence" value={`${Math.round(cheapest.confidence * 100)}%`} />
-                  </div>
-                  <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
-                    {[
-                      ['Base fare', cheapest.baseFare],
-                      ['Taxes', cheapest.taxes],
-                      ['UDF', cheapest.udf],
-                      ['Convenience', cheapest.convenienceFee],
-                      ['Total', cheapest.totalFare ?? cheapest.price],
-                    ].map(([label, value]) => (
-                      <div key={String(label)} className={`rounded-xl border px-3 py-2 ${theme === 'dark' ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'}`}>
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{label}</p>
-                        <p className={`mt-1 text-sm font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-                          {typeof value === 'number' ? formatPrice(value, cheapest.currency) : 'Unavailable'}
-                        </p>
-                      </div>
-                    ))}
+                  <div className={`mt-4 ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
+                    <InfoCard theme={theme} label="Updated" value={formatCollectedAt(cheapest.collectedAt)} />
                   </div>
                 </div>
               </div>
@@ -292,11 +288,8 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                   theme === 'dark' ? 'bg-white text-slate-950' : 'bg-slate-950 text-white'
                 }`}
               >
-                <p className={`text-sm ${theme === 'dark' ? 'text-slate-500' : 'text-slate-300'}`}>Lowest price</p>
-                <p className="mt-1 text-3xl font-bold">{formatPrice(cheapest.price, cheapest.currency)}</p>
-                <p className={`mt-1 text-sm ${theme === 'dark' ? 'text-slate-500' : 'text-slate-300'}`}>
-                  Offer ID: {cheapest.offerId}
-                </p>
+                <p className={`text-sm ${theme === 'dark' ? 'text-slate-500' : 'text-slate-300'}`}>Total Fare</p>
+                <p className="mt-1 text-3xl font-bold">{formatTotalFare(cheapest)}</p>
               </div>
             </div>
           </div>
@@ -320,13 +313,13 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             <thead className={`text-left text-sm ${theme === 'dark' ? 'bg-slate-900 text-slate-200' : 'bg-slate-950 text-slate-200'}`}>
               <tr>
                 <th className="px-5 py-4 font-semibold">Airline</th>
-                <th className="px-5 py-4 font-semibold">Flight</th>
+                <th className="px-5 py-4 font-semibold">Route</th>
                 <th className="px-5 py-4 font-semibold">Departure</th>
                 <th className="px-5 py-4 font-semibold">Arrival</th>
                 <th className="px-5 py-4 font-semibold">Duration</th>
                 <th className="px-5 py-4 font-semibold">Stops</th>
                 <th className="px-5 py-4 font-semibold">Updated</th>
-                <th className="px-5 py-4 font-semibold text-right">Price</th>
+                <th className="px-5 py-4 font-semibold text-right">Total fare</th>
               </tr>
             </thead>
             <tbody className={theme === 'dark' ? 'divide-y divide-slate-800' : 'divide-y divide-slate-100'}>
@@ -358,8 +351,7 @@ function FlightOfferCard({
   theme: 'dark' | 'light'
   isCheapest: boolean
 }) {
-  const brand = getAirlineBrandByCode(offer.airlineCode) ?? getAirlineBrand(offer.airline)
-  const airlineName = brand?.airline ?? offer.airline
+  const offerAirlines = getOfferAirlines(offer)
 
   return (
     <article
@@ -374,16 +366,18 @@ function FlightOfferCard({
       }`}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col items-start gap-2">
-          <AirlineMark airline={airlineName} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
-          <SourceBadge offer={offer} theme={theme} />
+        <div className="flex flex-wrap items-start gap-2">
+          {offerAirlines.map((airline) => {
+            const brand = getAirlineBrandByCode(airline.airlineCode) ?? getAirlineBrand(airline.airline)
+            return <AirlineMark key={airline.airlineCode} airline={airline.airline} code={airline.airlineCode} logoUrl={brand?.logoUrl} compact />
+          })}
         </div>
         <div className="text-right">
           <p className={`text-xs font-semibold uppercase tracking-[0.16em] ${theme === 'dark' ? 'text-slate-400' : 'text-slate-500'}`}>
-            Fare
+            Total fare
           </p>
           <p className={`mt-1 text-xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-            {formatPrice(offer.price, offer.currency)}
+            {formatTotalFare(offer)}
           </p>
         </div>
       </div>
@@ -406,9 +400,8 @@ function FlightOfferCard({
         </div>
       </div>
 
-      <div className={`mt-4 flex items-center justify-between border-t pt-3 text-xs ${theme === 'dark' ? 'border-white/10 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
-        <span>{offer.flightNumber}</span>
-        <span>{isCheapest ? 'Best price' : formatCollectedAt(offer.collectedAt)}</span>
+      <div className={`mt-4 flex items-center justify-end border-t pt-3 text-xs ${theme === 'dark' ? 'border-white/10 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+        <span>Updated {formatCollectedAt(offer.collectedAt)}</span>
       </div>
     </article>
   )
@@ -423,8 +416,7 @@ function FlightRow({
   theme: 'dark' | 'light'
   isCheapest: boolean
 }) {
-  const brand = getAirlineBrandByCode(offer.airlineCode) ?? getAirlineBrand(offer.airline)
-  const airlineName = brand?.airline ?? offer.airline
+  const offerAirlines = getOfferAirlines(offer)
 
   return (
     <tr
@@ -440,12 +432,14 @@ function FlightRow({
     >
       <td className="px-5 py-4">
         <div className="flex flex-col items-start gap-2">
-          <AirlineMark airline={airlineName} code={offer.airlineCode} logoUrl={brand?.logoUrl} compact />
-          <SourceBadge offer={offer} theme={theme} />
+          {offerAirlines.map((airline) => {
+            const brand = getAirlineBrandByCode(airline.airlineCode) ?? getAirlineBrand(airline.airline)
+            return <AirlineMark key={airline.airlineCode} airline={airline.airline} code={airline.airlineCode} logoUrl={brand?.logoUrl} compact />
+          })}
         </div>
       </td>
-      <td className={`whitespace-nowrap px-5 py-4 text-sm font-semibold ${theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
-        {offer.flightNumber}
+      <td className={`px-5 py-4 text-sm font-semibold ${theme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}>
+        {offer.origin} → {offer.destination}
       </td>
       <td className={`whitespace-nowrap px-5 py-4 text-sm ${theme === 'dark' ? 'text-slate-300' : 'text-slate-700'}`}>
         {offer.origin} {offer.departureTime}
@@ -463,41 +457,9 @@ function FlightRow({
         {formatCollectedAt(offer.collectedAt)}
       </td>
       <td className={`whitespace-nowrap px-5 py-4 text-right text-lg font-semibold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-        {formatPrice(offer.price, offer.currency)}
+        {formatTotalFare(offer)}
       </td>
     </tr>
-  )
-}
-
-function getSourceLabel(offer: FlightOffer) {
-  if (offer.sourceType === 'duffel' || offer.source.trim().toLowerCase() === 'duffel api') {
-    return 'Duffel API'
-  }
-
-  if (offer.sourceType === 'demo' || offer.source.trim().toLowerCase() === 'demo data') {
-    return 'Demo Data (Fallback)'
-  }
-
-  return offer.source || 'Unknown source'
-}
-
-function SourceBadge({ offer, theme }: { offer: FlightOffer; theme: 'dark' | 'light' }) {
-  const label = getSourceLabel(offer)
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${
-        offer.sourceType === 'demo'
-          ? theme === 'dark'
-            ? 'bg-amber-300/15 text-amber-200'
-            : 'bg-amber-100 text-amber-800'
-          : theme === 'dark'
-            ? 'bg-teal-300/15 text-teal-200'
-            : 'bg-teal-100 text-teal-800'
-      }`}
-    >
-      {label}
-    </span>
   )
 }
 
@@ -558,7 +520,7 @@ function LoadingState({ theme }: { theme: 'dark' | 'light' }) {
             </div>
             <div>
               <p className={`text-sm font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>Searching available flights</p>
-              <p className={`text-xs ${theme === 'dark' ? 'text-teal-100/70' : 'text-teal-800/70'}`}>Checking Duffel API and Demo Data for this route...</p>
+              <p className={`text-xs ${theme === 'dark' ? 'text-teal-100/70' : 'text-teal-800/70'}`}>Checking verified live flight sources for this route...</p>
             </div>
           </div>
         </div>

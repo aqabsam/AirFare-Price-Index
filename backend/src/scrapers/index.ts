@@ -43,12 +43,6 @@ export function getConfiguredAirlineScrapers() {
   return SCRAPER_FACTORIES
     .map((factory) => factory())
     .filter((scraper): scraper is WebsiteScraper => Boolean(scraper))
-    .filter((scraper) => {
-      if (scraper.definition.airline) {
-        return REQUIRED_AIRLINE_SCRAPERS.includes(scraper.definition.airline as (typeof REQUIRED_AIRLINE_SCRAPERS)[number])
-      }
-      return true
-    })
 }
 
 export function loadWebsiteScrapers() {

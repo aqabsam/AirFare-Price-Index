@@ -1,4 +1,3 @@
-import { loadFareSourceConfigs } from '../config/fareSources.js';
 import { fareStore } from './fareStore.js';
 const STALE_AFTER_MS = 12 * 60 * 60 * 1000;
 function normalizeKey(value) {
@@ -29,9 +28,32 @@ function deriveStatus(lastCollectedAt) {
     }
     return 'live';
 }
+function normalizeApprovedAirline(name, code) {
+    const normalizedName = name.trim().toLowerCase().replace(/[^a-z]/g, '');
+    const normalizedCode = code.trim().toUpperCase();
+    if (normalizedCode === '6E' || normalizedName === 'indigo' || normalizedName === 'indigoairlines')
+        return 'IndiGo';
+    if (normalizedCode === 'G8' || normalizedName === 'goair' || normalizedName === 'gofirst')
+        return 'GoAir';
+    if (normalizedCode === 'AI' || normalizedName === 'airindia')
+        return 'Air India';
+    if (normalizedCode === 'QP' || normalizedName === 'akasa' || normalizedName === 'akasaair')
+        return 'Akasa Air';
+    if (normalizedCode === 'SG' || normalizedName === 'spicejet')
+        return 'SpiceJet';
+    return null;
+}
 export async function calculateFareSourceHealth() {
-    const configs = await loadFareSourceConfigs();
     const snapshots = fareStore.getSnapshots();
+    const configs = [...new Map(snapshots
+            .filter((snapshot) => snapshot.sourceType !== 'demo' && snapshot.sourceType !== 'aggregated' && normalizeApprovedAirline(snapshot.airline, snapshot.airlineCode))
+            .map((snapshot) => [snapshot.sourceId ?? snapshot.source, {
+                id: snapshot.sourceId ?? snapshot.source,
+                name: snapshot.source,
+                sourceType: snapshot.sourceType,
+                kind: snapshot.sourceType === 'duffel' ? 'api' : 'page',
+                url: snapshot.sourceType === 'duffel' ? 'https://api.duffel.com' : '',
+            }])).values()];
     const sources = configs.map((source) => {
         const sourceKeys = sourceIdentityCandidates(source);
         const matchingSnapshots = snapshots.filter((snapshot) => {
@@ -40,13 +62,13 @@ export async function calculateFareSourceHealth() {
         });
         const lastCollectedAt = latestSnapshotTimestamp(matchingSnapshots);
         return {
-            id: source.id ?? normalizeKey(source.name),
+            id: source.id,
             name: source.name,
             sourceType: source.sourceType,
-            kind: source.kind ?? 'page',
+            kind: source.kind,
             url: source.url ?? '',
-            routeCount: source.routes?.length ?? 0,
-            bookingWindows: source.bookingWindows ?? [],
+            routeCount: 0,
+            bookingWindows: [],
             snapshotCount: matchingSnapshots.length,
             lastCollectedAt,
             status: deriveStatus(lastCollectedAt),

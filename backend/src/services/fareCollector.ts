@@ -1,50 +1,14 @@
-import { chromium, type Browser } from 'playwright'
 import { loadTrackedRoutes, type TrackedRoute } from '../data/trackedRoutes.js'
 import type { FareSnapshot } from '../types/fare.js'
 import type { FlightSearchRequest } from '../types/flight.js'
-import { loadWebsiteScrapers } from '../scrapers/index.js'
 import { searchDuffelOffers } from '../providers/duffel.js'
 import type { NormalizedFlightOffer } from '../types/flight.js'
 
-const MAX_CONCURRENT = Math.max(1, Math.min(4, Number(process.env.SCRAPER_MAX_CONCURRENT ?? '2')))
-const SCRAPE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPER_TIMEOUT ?? '30000'))
-const CACHE_TTL_MS = Math.max(0, Number(process.env.SCRAPER_CACHE_TTL ?? '300')) * 1_000
 const IST_TIME_ZONE = 'Asia/Kolkata'
 export const ADVANCE_WINDOWS = [1, 7, 15, 30, 45] as const
 
-const routeCache = new Map<string, { expiresAt: number; snapshots: FareSnapshot[] }>()
-const robotsCache = new Map<string, { expiresAt: number; disallowed: string[] }>()
 const DUFFEL_RETRIES = Math.max(0, Number(process.env.DUFFEL_RETRIES ?? '2'))
-const SOURCE_DELAY_MS = Math.max(0, Number(process.env.SOURCE_RATE_LIMIT_MS ?? '250'))
-
-async function robotsAllowed(targetUrl: string) {
-  let origin: string
-  try {
-    origin = new URL(targetUrl).origin
-  } catch {
-    return false
-  }
-
-  const cached = robotsCache.get(origin)
-  let disallowed = cached?.expiresAt && cached.expiresAt > Date.now() ? cached.disallowed : null
-  if (!disallowed) {
-    try {
-      const response = await fetch(`${origin}/robots.txt`)
-      const body = response.ok ? await response.text() : ''
-      disallowed = body.split(/\r?\n/).reduce<string[]>((rules, line) => {
-        const match = line.match(/^\s*Disallow:\s*(\S*)/i)
-        if (match?.[1]) rules.push(match[1])
-        return rules
-      }, [])
-      robotsCache.set(origin, { expiresAt: Date.now() + 3_600_000, disallowed })
-    } catch {
-      return false
-    }
-  }
-
-  const pathname = new URL(targetUrl).pathname
-  return !disallowed.some((rule) => rule === '/' || pathname.startsWith(rule))
-}
+const MAX_CONCURRENT_COLLECTIONS = 2
 
 function todayInIndia() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: IST_TIME_ZONE }).format(new Date())
@@ -86,54 +50,10 @@ function cheapestUnique(snapshots: FareSnapshot[]) {
   return [...byFlight.values()].sort((left, right) => left.price - right.price)
 }
 
-async function scrapeSources(browser: Browser, input: FlightSearchRequest) {
-  const cacheKey = `${input.origin}-${input.destination}-${input.departureDate}`.toUpperCase()
-  const cached = routeCache.get(cacheKey)
-  if (cached && cached.expiresAt > Date.now()) return cached.snapshots
-
-  const scrapers = loadWebsiteScrapers()
-  if (!scrapers.length) return []
-
-  const settled = await mapWithConcurrency(scrapers, async (scraper) => {
-    const sourceName = scraper.definition.name
-    console.info(`[scraper] ${sourceName} STARTED route=${input.origin}-${input.destination}-${input.departureDate}`)
-    try {
-      const targetUrl = scraper.definition.buildSearchUrl?.(input) ?? scraper.definition.url
-      if (!(await robotsAllowed(targetUrl))) {
-        console.warn(`[scraper] ${sourceName} SKIPPED by robots.txt`)
-        return []
-      }
-      if (SOURCE_DELAY_MS > 0) await new Promise((resolve) => setTimeout(resolve, SOURCE_DELAY_MS))
-      const timeout = new Promise<FareSnapshot[]>((_, reject) => {
-        setTimeout(() => reject(new Error(`${scraper.definition.name} timed out`)), SCRAPE_TIMEOUT_MS)
-      })
-      const snapshots = await Promise.race([scraper.scrape(browser, input), timeout])
-      if (snapshots.length > 0) {
-        console.info(`[scraper] ${sourceName} SUCCESS fares=${snapshots.length}`)
-      } else {
-        console.info(`[scraper] ${sourceName} NO FARES`)
-      }
-      return snapshots
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const status = /timed out|timeout|aborted/i.test(message) ? 'TIMEOUT' : 'FAILED'
-      console.warn(`[scraper] ${sourceName} ${status}: ${message}`)
-      return []
-    }
-  })
-
-  const snapshots = settled
-    .flat()
-    .filter((snapshot) => !!snapshot && !!snapshot.routeKey)
-
-  if (CACHE_TTL_MS > 0) routeCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, snapshots })
-  return snapshots
-}
-
 function offerToSnapshot(offer: NormalizedFlightOffer, input: FlightSearchRequest, sourceType: FareSnapshot['sourceType'] = 'duffel'): FareSnapshot {
   const collectionDate = todayInIndia()
   return {
-    id: offer.offerId,
+    id: `${offer.offerId}-${collectionDate}`,
     routeKey: `${offer.origin}-${offer.destination}-${input.departureDate}`,
     origin: offer.origin,
     destination: offer.destination,
@@ -168,7 +88,6 @@ function offerToSnapshot(offer: NormalizedFlightOffer, input: FlightSearchReques
 async function collectDuffel(input: FlightSearchRequest) {
   for (let attempt = 0; attempt <= DUFFEL_RETRIES; attempt += 1) {
     try {
-      if (SOURCE_DELAY_MS > 0) await new Promise((resolve) => setTimeout(resolve, SOURCE_DELAY_MS))
       return (await searchDuffelOffers(input)).map((offer) => offerToSnapshot(offer, input))
     } catch (error) {
       if (attempt === DUFFEL_RETRIES) {
@@ -192,33 +111,28 @@ async function mapWithConcurrency<T, R>(items: T[], worker: (item: T) => Promise
     }
   }
 
-  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT, items.length) }, () => consume()))
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_COLLECTIONS, items.length) }, () => consume()))
   return results
 }
 
 async function collectForInputs(inputs: FlightSearchRequest[]) {
-  const scrapers = loadWebsiteScrapers()
-  const browser = scrapers.length ? await chromium.launch({ headless: process.env.SCRAPER_HEADLESS?.toLowerCase() !== 'false' }) : null
-  try {
-    const results = await mapWithConcurrency(inputs, async (input) => {
-      const scraped = browser ? await scrapeSources(browser, input) : []
-      if (scraped.length) return scraped
-      const duffel = await collectDuffel(input)
-      return duffel
-    })
-    const collectionDate = todayInIndia()
-    const snapshots = results.flat().map((snapshot) => {
-      const departure = new Date(`${snapshot.departureDate}T00:00:00Z`).getTime()
-      const collection = new Date(`${collectionDate}T00:00:00Z`).getTime()
-      const bookingWindowDays = Number.isFinite(departure) && Number.isFinite(collection)
-        ? Math.max(0, Math.round((departure - collection) / 86_400_000))
-        : snapshot.bookingWindowDays ?? 0
-      return { ...snapshot, bookingWindowDays }
-    })
-    return cheapestUnique(snapshots)
-  } finally {
-    await browser?.close()
-  }
+  const results = await mapWithConcurrency(inputs, async (input) => {
+    const duffel = await collectDuffel(input)
+    if (!duffel.length) {
+      console.warn(`[Fare Collection] No verified Duffel offers for ${input.origin}-${input.destination}-${input.departureDate}`)
+    }
+    return duffel
+  })
+  const collectionDate = todayInIndia()
+  const snapshots = results.flat().map((snapshot) => {
+    const departure = new Date(`${snapshot.departureDate}T00:00:00Z`).getTime()
+    const collection = new Date(`${collectionDate}T00:00:00Z`).getTime()
+    const bookingWindowDays = Number.isFinite(departure) && Number.isFinite(collection)
+      ? Math.max(0, Math.round((departure - collection) / 86_400_000))
+      : snapshot.bookingWindowDays ?? 0
+    return { ...snapshot, bookingWindowDays }
+  })
+  return cheapestUnique(snapshots)
 }
 
 export async function collectFareSnapshots() {

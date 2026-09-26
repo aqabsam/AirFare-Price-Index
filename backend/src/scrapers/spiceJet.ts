@@ -27,7 +27,8 @@ export function createSpiceJetScraper(): WebsiteScraper | null {
       submit: [/search|find flights|continue/i],
     },
     buildSearchUrl: (input: FlightSearchRequest) => {
-      return `https://www.spicejet.com/search?from=${input.origin}&to=${input.destination}&tripType=1&departure=${input.departureDate}&adult=${input.adults}`
+      const configuredOrigin = new URL(url).origin
+      return `${configuredOrigin}/search?from=${input.origin}&to=${input.destination}&tripType=1&departure=${input.departureDate}&adult=${input.adults}`
     },
   }
 

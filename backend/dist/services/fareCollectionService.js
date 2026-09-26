@@ -1,5 +1,8 @@
 import { collectFareSnapshots } from './fareCollector.js';
 import { fareStore } from './fareStore.js';
+import { cleanFareSnapshots } from './fareCleaningService.js';
+import { finishCollectionLog, startCollectionLog } from './collectionLogService.js';
+import { calculateFareAnalytics } from './airfareIndexService.js';
 const currentState = {
     status: 'idle',
     trigger: 'startup',
@@ -29,22 +32,55 @@ export async function collectAndStoreFareSnapshots(trigger) {
         message: null,
     });
     activeRun = (async () => {
+        const log = startCollectionLog(trigger, 'DUFFEL API');
         try {
             const snapshots = await collectFareSnapshots();
             if (!snapshots.length) {
-                throw new Error('No live fares were collected. Configure real airline or OTA sources before running the pipeline.');
+                throw new Error('No verified Duffel fares were available for the tracked routes.');
             }
-            fareStore.replaceSnapshots(snapshots);
-            await fareStore.persist();
+            const cleaning = cleanFareSnapshots(snapshots);
+            const rejectionCounts = cleaning.rejected.reduce((counts, snapshot) => {
+                const reason = snapshot.rejectedReason ?? snapshot.dataQualityStatus ?? 'unknown';
+                counts[reason] = (counts[reason] ?? 0) + 1;
+                return counts;
+            }, {});
+            console.info(`[Fare Collection] Duffel snapshots=${snapshots.length}, cleaned=${cleaning.cleaned.length}, rejected=${cleaning.rejected.length}`);
+            console.info(`[Fare Collection] Rejection counts: ${Object.entries(rejectionCounts).map(([reason, count]) => `${reason}=${count}`).join(', ') || 'none'}`);
+            fareStore.replaceSnapshots(cleaning.cleaned, cleaning.rejected, snapshots);
+            const analytics = calculateFareAnalytics();
+            const calculatedAt = new Date().toISOString();
+            const indexSnapshots = [
+                ...analytics.summary.map((summary) => ({
+                    routeKey: summary.routeKey,
+                    departureDate: summary.departureDate,
+                    cheapestPrice: summary.cheapestPrice,
+                    averagePrice: summary.averagePrice,
+                    medianPrice: summary.medianPrice,
+                    airfareIndex: summary.airfareIndex ?? 0,
+                    calculatedAt,
+                })),
+                ...analytics.dailyIndex.map((point) => ({
+                    routeKey: 'MARKET',
+                    departureDate: point.collectionDate,
+                    cheapestPrice: point.cheapestPrice,
+                    averagePrice: point.averagePrice,
+                    medianPrice: point.averagePrice,
+                    airfareIndex: point.airfareIndex ?? 0,
+                    calculatedAt,
+                })),
+            ];
+            await fareStore.persist(indexSnapshots);
+            finishCollectionLog(log, { status: 'success', records: cleaning.cleaned.length, message: `Collected ${snapshots.length}; accepted ${cleaning.cleaned.length}; rejected ${cleaning.rejected.length}` });
             updateState({
                 status: 'success',
                 finishedAt: new Date().toISOString(),
                 sourceCount: new Set(snapshots.map((snapshot) => snapshot.source)).size,
-                snapshotCount: snapshots.length,
-                message: `Collected ${snapshots.length} fare snapshots`,
+                snapshotCount: cleaning.cleaned.length,
+                message: `Collected ${snapshots.length} fare snapshots; accepted ${cleaning.cleaned.length}`,
             });
         }
         catch (error) {
+            finishCollectionLog(log, { status: 'error', records: 0, message: error instanceof Error ? error.message : 'Unable to collect fare snapshots' });
             updateState({
                 status: 'error',
                 finishedAt: new Date().toISOString(),

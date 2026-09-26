@@ -11,6 +11,17 @@ export type ScraperFieldHints = {
   submit: RegExp[]
 }
 
+export type ScrapeExtraction = {
+  snapshots: FareSnapshot[]
+  candidateCount: number
+  rejectionCounts: Record<string, number>
+}
+
+export type ScraperRunResult = ScrapeExtraction & {
+  pageStatus: number | null
+  networkResponses: string[]
+}
+
 export type ScraperDefinition = {
   id: string
   name: string
@@ -21,12 +32,12 @@ export type ScraperDefinition = {
   cardSelectors: string[]
   hints: ScraperFieldHints
   buildSearchUrl?: (input: FlightSearchRequest) => string
-  extractSnapshots?: (page: Page, definition: ScraperDefinition, input: FlightSearchRequest) => Promise<FareSnapshot[]>
+  extractSnapshots?: (page: Page, definition: ScraperDefinition, input: FlightSearchRequest) => Promise<ScrapeExtraction>
 }
 
 export type WebsiteScraper = {
   definition: ScraperDefinition
-  scrape: (browser: Browser, input: FlightSearchRequest) => Promise<FareSnapshot[]>
+  scrape: (browser: Browser, input: FlightSearchRequest) => Promise<ScraperRunResult>
 }
 
-export type PageScraper = (page: Page, definition: ScraperDefinition, input: FlightSearchRequest) => Promise<FareSnapshot[]>
+export type PageScraper = (page: Page, definition: ScraperDefinition, input: FlightSearchRequest) => Promise<ScrapeExtraction>

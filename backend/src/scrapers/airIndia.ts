@@ -2,7 +2,7 @@ import { scrapeWebsite } from './shared.js'
 import type { WebsiteScraper } from './types.js'
 
 export function createAirIndiaScraper(): WebsiteScraper | null {
-  const url = process.env.SCRAPER_AIR_INDIA_URL?.trim()
+  const url = process.env.SCRAPER_AIR_INDIA_URL?.trim() || 'https://www.airindia.com/en-in/book-flights'
   if (!url) return null
   const definition = {
     id: 'air-india', name: 'Air India website', sourceType: 'airline' as const, airline: 'Air India', airlineCode: 'AI', url,

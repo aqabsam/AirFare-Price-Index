@@ -1,6 +1,31 @@
 import { calculateFareAnalytics, calculateRouteIndex } from '../services/airfareIndexService.js';
+import { calculateDgcaBacktest } from '../services/dgcaBacktestService.js';
+import { calculateDataQuality } from '../services/dataQualityService.js';
 import { fareStore } from '../services/fareStore.js';
+import { getCollectionLogs } from '../services/collectionLogService.js';
+import { getFareCollectionStatus } from '../services/fareCollectionService.js';
+import { getDgcaAnalytics } from '../services/dgcaAnalyticsService.js';
+import { getCsvHistoricalAnalytics } from '../services/csvHistoricalAnalyticsService.js';
+import { getCompatibleTestFareObservations } from '../services/testFareFallbackService.js';
 export async function analyticsRoutes(fastify) {
+    const readFilters = (request) => request.query;
+    fastify.get('/api/dgca/analytics', async () => getDgcaAnalytics());
+    fastify.get('/api/historical/csv-analytics', async () => getCsvHistoricalAnalytics());
+    fastify.get('/api/fares/test-fallback', async (request) => {
+        const query = request.query;
+        if (!query.origin || !query.destination || !query.travelDate)
+            return { observations: [] };
+        const observations = await getCompatibleTestFareObservations({
+            origin: query.origin,
+            destination: query.destination,
+            travelDate: query.travelDate,
+        });
+        return { observations };
+    });
+    fastify.get('/api/fares', async (request) => {
+        const query = readFilters(request);
+        return { snapshots: fareStore.getSnapshots().filter((snapshot) => (!query.origin || snapshot.origin === query.origin.toUpperCase()) && (!query.destination || snapshot.destination === query.destination.toUpperCase()) && (!query.departureDate || snapshot.departureDate === query.departureDate)) };
+    });
     fastify.get('/api/fares/snapshots', async (request) => {
         const query = request.query;
         const snapshots = fareStore.getSnapshots().filter((snapshot) => {
@@ -16,6 +41,18 @@ export async function analyticsRoutes(fastify) {
             return true;
         });
         return { snapshots };
+    });
+    fastify.get('/api/fares/history', async (request) => {
+        const query = request.query;
+        const requestedDays = Number(query.days ?? '30');
+        const days = Number.isFinite(requestedDays) ? Math.min(30, Math.max(1, Math.round(requestedDays))) : 30;
+        const snapshots = fareStore.getHistoricalSnapshots(days);
+        const collectionDates = [...new Set(snapshots.map((snapshot) => snapshot.collectionDate ?? snapshot.collectedAt.slice(0, 10)))].sort();
+        return { days, collectionDates, snapshots };
+    });
+    fastify.get('/api/fares/routes', async (request) => {
+        const query = readFilters(request);
+        return { routes: calculateRouteIndex(query.origin, query.destination, query.departureDate) };
     });
     fastify.get('/api/fares/summary', async (request) => {
         const query = request.query;
@@ -34,4 +71,27 @@ export async function analyticsRoutes(fastify) {
         const query = request.query;
         return calculateFareAnalytics(query.origin, query.destination, query.departureDate);
     });
+    fastify.get('/api/index/daily', async (request) => ({ dailyIndex: calculateFareAnalytics(readFilters(request).origin, readFilters(request).destination, readFilters(request).departureDate).dailyIndex }));
+    fastify.get('/api/index/weekly', async (request) => ({ weeklyIndex: calculateFareAnalytics(readFilters(request).origin, readFilters(request).destination, readFilters(request).departureDate).weeklyIndex }));
+    fastify.get('/api/index/monthly', async (request) => ({ monthlyIndex: calculateFareAnalytics(readFilters(request).origin, readFilters(request).destination, readFilters(request).departureDate).monthlyIndex }));
+    fastify.get('/api/index', async (request) => {
+        const query = readFilters(request);
+        return calculateFareAnalytics(query.origin, query.destination, query.departureDate);
+    });
+    fastify.get('/api/index/history', async () => ({ history: fareStore.getIndexHistory() }));
+    fastify.get('/api/fares/dgca-backtest', async (request) => {
+        const query = request.query;
+        const windowDays = Number(query.windowDays ?? '30');
+        return calculateDgcaBacktest(Number.isFinite(windowDays) ? Math.max(1, Math.round(windowDays)) : 30);
+    });
+    fastify.get('/api/fares/data-quality', async () => calculateDataQuality());
+    fastify.get('/api/fares/explorer', async () => ({
+        raw: fareStore.getRawSnapshots(),
+        cleaned: fareStore.getSnapshots(),
+        rejected: fareStore.getRejectedSnapshots(),
+        indexHistory: fareStore.getIndexHistory(),
+        collectionStatus: getFareCollectionStatus(),
+        collectionLogs: getCollectionLogs(),
+    }));
+    fastify.get('/api/collection/status', async () => ({ status: getFareCollectionStatus(), logs: getCollectionLogs() }));
 }

@@ -1,7 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Pool } from 'pg';
-import { DEFAULT_FARE_SNAPSHOTS } from '../data/fareCatalog.js';
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'fare-snapshots.json');
 const DATABASE_URL = process.env.DATABASE_URL?.trim() || '';
@@ -12,28 +11,45 @@ function formatDuration(minutes) {
     const remainder = minutes % 60;
     return `${hours}h ${String(remainder).padStart(2, '0')}m`;
 }
+function durationToMinutes(duration) {
+    const match = duration.match(/^(\d+)h\s+(\d{2})m$/i);
+    if (!match) {
+        return 0;
+    }
+    return Number(match[1]) * 60 + Number(match[2]);
+}
 export function snapshotsToOffers(snapshots, adults) {
     return snapshots
-        .filter((snapshot) => snapshot.seatsRemaining >= adults)
-        .map((snapshot) => ({
-        airline: snapshot.airline,
-        airlineCode: snapshot.airlineCode,
-        flightNumber: snapshot.flightNumber,
-        origin: snapshot.origin,
-        destination: snapshot.destination,
-        departureTime: snapshot.departureTime,
-        arrivalTime: snapshot.arrivalTime,
-        duration: formatDuration(snapshot.durationMinutes),
-        stops: snapshot.stops,
-        price: snapshot.price * adults,
-        currency: snapshot.currency,
-        offerId: snapshot.id,
-        seatsRemaining: snapshot.seatsRemaining,
-        source: snapshot.source,
-        sourceType: snapshot.sourceType,
-        collectedAt: snapshot.collectedAt,
-        confidence: snapshot.confidence,
-    }))
+        .filter((snapshot) => snapshot.seatsRemaining <= 0 || snapshot.seatsRemaining >= adults)
+        .map((snapshot) => {
+        const isManualReference = snapshot.sourceType === 'aggregated';
+        return {
+            airline: snapshot.airline,
+            airlineCode: snapshot.airlineCode,
+            flightNumber: snapshot.flightNumber,
+            origin: snapshot.origin,
+            destination: snapshot.destination,
+            departureDate: snapshot.departureDate,
+            liveMode: false,
+            departureTime: snapshot.departureTime,
+            arrivalTime: snapshot.arrivalTime,
+            duration: formatDuration(snapshot.durationMinutes),
+            stops: snapshot.stops,
+            price: snapshot.price * adults,
+            baseFare: snapshot.baseFare === null || snapshot.baseFare === undefined ? null : snapshot.baseFare * adults,
+            taxes: snapshot.taxes === null || snapshot.taxes === undefined ? null : snapshot.taxes * adults,
+            udf: snapshot.udf === null || snapshot.udf === undefined ? null : snapshot.udf * adults,
+            convenienceFee: snapshot.convenienceFee === null || snapshot.convenienceFee === undefined ? null : snapshot.convenienceFee * adults,
+            totalFare: snapshot.totalFare === null || snapshot.totalFare === undefined ? null : snapshot.totalFare * adults,
+            currency: snapshot.currency,
+            offerId: snapshot.id,
+            seatsRemaining: snapshot.seatsRemaining,
+            source: isManualReference ? 'Manual/Reference Data' : snapshot.source,
+            sourceType: snapshot.sourceType,
+            collectedAt: snapshot.collectedAt,
+            confidence: snapshot.confidence,
+        };
+    })
         .sort((left, right) => left.price - right.price);
 }
 function average(values) {
@@ -57,6 +73,9 @@ function median(values) {
 }
 function routeKeyFrom(origin, destination, departureDate) {
     return `${origin.toUpperCase()}-${destination.toUpperCase()}-${departureDate}`;
+}
+function observationId(offer) {
+    return `${offer.offerId}|${offer.collectedAt}`;
 }
 function normalizeSnapshot(snapshot) {
     const collectionDate = (snapshot.collectionDate ?? snapshot.collectedAt ?? new Date().toISOString()).trim().slice(0, 10);
@@ -82,8 +101,14 @@ function normalizeSnapshot(snapshot) {
         currency: snapshot.currency.trim().toUpperCase(),
         seatsRemaining: Math.max(0, Math.round(snapshot.seatsRemaining)),
         source: snapshot.source.trim(),
+        collectionStage: snapshot.collectionStage ?? (snapshot.sourceType === 'duffel' ? 'DUFFEL' : snapshot.sourceType === 'demo' || snapshot.sourceType === 'aggregated' ? 'DEMO' : 'SCRAPER'),
         sourceType: snapshot.sourceType,
         confidence: Math.min(1, Math.max(0, Number(snapshot.confidence) || 0)),
+        fareClass: snapshot.fareClass?.trim() || null,
+        soldOut: snapshot.soldOut ?? snapshot.seatsRemaining <= 0,
+        dataQualityScore: snapshot.dataQualityScore ?? null,
+        dataQualityStatus: snapshot.dataQualityStatus ?? 'valid',
+        rejectedReason: snapshot.rejectedReason ?? null,
     };
 }
 function computeSummary(snapshots) {
@@ -141,15 +166,29 @@ function snapshotToDbRow(snapshot) {
         snapshot.durationMinutes,
         snapshot.stops,
         snapshot.price,
+        snapshot.baseFare ?? null,
+        snapshot.taxes ?? null,
+        snapshot.udf ?? null,
+        snapshot.convenienceFee ?? null,
+        snapshot.totalFare ?? snapshot.price,
         snapshot.currency,
         snapshot.seatsRemaining,
         snapshot.source,
         snapshot.sourceType,
         snapshot.confidence,
+        snapshot.fareClass ?? null,
+        snapshot.soldOut ?? snapshot.seatsRemaining <= 0,
+        snapshot.dataQualityScore ?? null,
+        snapshot.dataQualityStatus ?? 'valid',
+        snapshot.rejectedReason ?? null,
+        snapshot.collectionStage ?? (snapshot.sourceType === 'duffel' ? 'DUFFEL' : snapshot.sourceType === 'demo' || snapshot.sourceType === 'aggregated' ? 'DEMO' : 'SCRAPER'),
     ];
 }
 class FareStore {
     snapshots = [];
+    rawSnapshots = [];
+    rejectedSnapshots = [];
+    indexHistory = [];
     pool = null;
     async getPool() {
         if (!DATABASE_URL) {
@@ -194,11 +233,74 @@ class FareStore {
         confidence double precision not null
       );
     `);
+        await pool.query(`
+      create table if not exists raw_fare_pages (
+        id bigserial primary key,
+        raw_record_key text not null unique,
+        source text not null,
+        route_key text not null,
+        origin_code char(3) not null,
+        destination_code char(3) not null,
+        departure_date date not null,
+        collected_at timestamptz not null,
+        source_type text not null,
+        collection_stage text,
+        payload jsonb not null
+      );
+    `);
+        await pool.query(`
+      create table if not exists rejected_fares (
+        raw_record_key text primary key,
+        source text not null,
+        route_key text not null,
+        origin_code char(3) not null,
+        destination_code char(3) not null,
+        departure_date date not null,
+        collected_at timestamptz not null,
+        source_type text not null,
+        collection_stage text,
+        rejection_reason text not null,
+        data_quality_status text,
+        data_quality_score integer,
+        payload jsonb not null
+      );
+    `);
+        await pool.query(`
+      create table if not exists airfare_index_snapshots (
+        id bigserial primary key,
+        snapshot_key text not null unique,
+        route_key text not null,
+        departure_date date not null,
+        cheapest_price numeric(12, 2) not null,
+        average_price numeric(12, 2) not null,
+        median_price numeric(12, 2) not null,
+        airfare_index numeric(12, 4) not null,
+        calculated_at timestamptz not null
+      );
+    `);
+        await pool.query('alter table raw_fare_pages add column if not exists raw_record_key text;');
+        await pool.query('alter table raw_fare_pages add column if not exists source_type text;');
+        await pool.query('alter table raw_fare_pages add column if not exists collection_stage text;');
+        await pool.query('create unique index if not exists raw_fare_pages_record_key_idx on raw_fare_pages(raw_record_key);');
+        await pool.query('alter table airfare_index_snapshots add column if not exists snapshot_key text;');
+        await pool.query('alter table airfare_index_snapshots add column if not exists calculated_at timestamptz;');
+        await pool.query('create unique index if not exists airfare_index_snapshots_key_idx on airfare_index_snapshots(snapshot_key);');
         await pool.query('create index if not exists normalized_fares_route_key_idx on normalized_fares(route_key);');
         await pool.query('create index if not exists normalized_fares_departure_date_idx on normalized_fares(departure_date);');
         await pool.query('alter table normalized_fares add column if not exists booking_window_days integer not null default 0;');
         await pool.query('alter table normalized_fares add column if not exists collection_date date not null default current_date;');
         await pool.query('alter table normalized_fares add column if not exists source_id text;');
+        await pool.query('alter table normalized_fares add column if not exists base_fare integer;');
+        await pool.query('alter table normalized_fares add column if not exists taxes integer;');
+        await pool.query('alter table normalized_fares add column if not exists udf integer;');
+        await pool.query('alter table normalized_fares add column if not exists convenience_fee integer;');
+        await pool.query('alter table normalized_fares add column if not exists total_fare integer;');
+        await pool.query('alter table normalized_fares add column if not exists fare_class text;');
+        await pool.query('alter table normalized_fares add column if not exists sold_out boolean not null default false;');
+        await pool.query('alter table normalized_fares add column if not exists data_quality_score integer;');
+        await pool.query('alter table normalized_fares add column if not exists data_quality_status text;');
+        await pool.query('alter table normalized_fares add column if not exists rejected_reason text;');
+        await pool.query('alter table normalized_fares add column if not exists collection_stage text;');
     }
     async loadFromDatabase() {
         const pool = await this.getPool();
@@ -228,15 +330,37 @@ class FareStore {
             durationMinutes: row.duration_minutes,
             stops: row.stops,
             price: row.price,
+            baseFare: row.base_fare,
+            taxes: row.taxes,
+            udf: row.udf,
+            convenienceFee: row.convenience_fee,
+            totalFare: row.total_fare,
             currency: row.currency,
             seatsRemaining: row.seats_remaining,
             source: row.source,
             sourceType: row.source_type,
+            collectionStage: row.collection_stage ?? undefined,
             confidence: row.confidence,
+            fareClass: row.fare_class,
+            soldOut: row.sold_out ?? undefined,
+            dataQualityScore: row.data_quality_score ?? undefined,
+            dataQualityStatus: row.data_quality_status ?? undefined,
+            rejectedReason: row.rejected_reason,
         }));
+        const rawResult = await pool.query('select * from raw_fare_pages order by collected_at desc');
+        this.rawSnapshots = rawResult.rows.map((row) => normalizeSnapshot(row.payload));
+        const rejectedResult = await pool.query('select * from rejected_fares order by collected_at desc');
+        this.rejectedSnapshots = rejectedResult.rows.map((row) => normalizeSnapshot({
+            ...row.payload,
+            dataQualityStatus: row.data_quality_status ?? row.payload.dataQualityStatus,
+            dataQualityScore: row.data_quality_score ?? row.payload.dataQualityScore,
+            rejectedReason: row.rejection_reason,
+        }));
+        const historyResult = await pool.query('select route_key as "routeKey", departure_date as "departureDate", cheapest_price as "cheapestPrice", average_price as "averagePrice", median_price as "medianPrice", airfare_index as "airfareIndex", calculated_at as "calculatedAt" from airfare_index_snapshots order by calculated_at desc');
+        this.indexHistory = historyResult.rows;
         return true;
     }
-    async syncToDatabase() {
+    async syncToDatabase(indexSnapshots = []) {
         const pool = await this.getPool();
         if (!pool) {
             return;
@@ -250,11 +374,12 @@ class FareStore {
           insert into normalized_fares (
             id, route_key, origin_code, destination_code, departure_date, booking_window_days, collection_date, collected_at,
             source_id, airline, airline_code, flight_number, departure_time, arrival_time, duration_minutes,
-            stops, price, currency, seats_remaining, source, source_type, confidence
+            stops, price, base_fare, taxes, udf, convenience_fee, total_fare, currency, seats_remaining, source, source_type, confidence,
+            fare_class, sold_out, data_quality_score, data_quality_status, rejected_reason, collection_stage
           ) values (
             $1, $2, $3, $4, $5, $6, $7, $8,
             $9, $10, $11, $12, $13, $14, $15,
-            $16, $17, $18, $19, $20, $21, $22
+            $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
           )
           on conflict (id) do update set
             route_key = excluded.route_key,
@@ -273,12 +398,39 @@ class FareStore {
             duration_minutes = excluded.duration_minutes,
             stops = excluded.stops,
             price = excluded.price,
+            base_fare = excluded.base_fare,
+            taxes = excluded.taxes,
+            udf = excluded.udf,
+            convenience_fee = excluded.convenience_fee,
+            total_fare = excluded.total_fare,
             currency = excluded.currency,
             seats_remaining = excluded.seats_remaining,
             source = excluded.source,
             source_type = excluded.source_type,
-            confidence = excluded.confidence
+            confidence = excluded.confidence,
+            fare_class = excluded.fare_class,
+            sold_out = excluded.sold_out,
+            data_quality_score = excluded.data_quality_score,
+            data_quality_status = excluded.data_quality_status,
+            rejected_reason = excluded.rejected_reason,
+            collection_stage = excluded.collection_stage
         `, snapshotToDbRow(snapshot));
+            }
+            for (const snapshot of this.rawSnapshots) {
+                await client.query(`insert into raw_fare_pages (raw_record_key, source, route_key, origin_code, destination_code, departure_date, collected_at, source_type, collection_stage, payload)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           on conflict (raw_record_key) do update set payload = excluded.payload, collected_at = excluded.collected_at`, [rawRecordKey(snapshot), snapshot.source, snapshot.routeKey, snapshot.origin, snapshot.destination, snapshot.departureDate, snapshot.collectedAt, snapshot.sourceType, snapshot.collectionStage, snapshot]);
+            }
+            for (const snapshot of this.rejectedSnapshots) {
+                await client.query(`insert into rejected_fares (raw_record_key, source, route_key, origin_code, destination_code, departure_date, collected_at, source_type, collection_stage, rejection_reason, data_quality_status, data_quality_score, payload)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           on conflict (raw_record_key) do update set rejection_reason = excluded.rejection_reason, payload = excluded.payload`, [rawRecordKey(snapshot), snapshot.source, snapshot.routeKey, snapshot.origin, snapshot.destination, snapshot.departureDate, snapshot.collectedAt, snapshot.sourceType, snapshot.collectionStage, snapshot.rejectedReason ?? 'Rejected during cleaning', snapshot.dataQualityStatus, snapshot.dataQualityScore, snapshot]);
+            }
+            for (const snapshot of indexSnapshots) {
+                const snapshotKey = `${snapshot.routeKey}|${snapshot.departureDate}|${snapshot.calculatedAt}`;
+                await client.query(`insert into airfare_index_snapshots (snapshot_key, route_key, departure_date, cheapest_price, average_price, median_price, airfare_index, calculated_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8)
+           on conflict (snapshot_key) do nothing`, [snapshotKey, snapshot.routeKey, snapshot.departureDate, snapshot.cheapestPrice, snapshot.averagePrice, snapshot.medianPrice, snapshot.airfareIndex, snapshot.calculatedAt]);
             }
             await client.query('commit');
         }
@@ -303,29 +455,60 @@ class FareStore {
         if (loadedFromDatabase) {
             return;
         }
-        if (ALLOW_FILE_CACHE) {
+        if (ALLOW_FILE_CACHE || !DATABASE_URL) {
             try {
                 const raw = await readFile(DATA_FILE, 'utf8');
                 const parsed = JSON.parse(raw);
                 const snapshots = Array.isArray(parsed) ? parsed : parsed.snapshots;
                 if (Array.isArray(snapshots) && snapshots.length > 0) {
                     this.snapshots = snapshots.map(normalizeSnapshot);
+                    this.rawSnapshots = [...this.snapshots];
+                    return;
                 }
             }
             catch {
                 this.snapshots = [];
             }
         }
-        else {
-            this.snapshots = DEFAULT_FARE_SNAPSHOTS.map(normalizeSnapshot);
-        }
-        await this.persist();
+        this.snapshots = [];
+        this.rawSnapshots = [];
+        this.rejectedSnapshots = [];
+        this.indexHistory = [];
     }
     getSnapshots() {
         return [...this.snapshots];
     }
+    getHistoricalSnapshots(days = 30, now = new Date()) {
+        const cutoff = new Date(now);
+        cutoff.setUTCHours(0, 0, 0, 0);
+        cutoff.setUTCDate(cutoff.getUTCDate() - Math.max(0, days - 1));
+        const cutoffDate = cutoff.toISOString().slice(0, 10);
+        const allowedAirlines = new Set(['indigo', 'goair', 'gofirst', 'air india', 'akasa air', 'spicejet']);
+        return this.snapshots.filter((snapshot) => {
+            const airline = snapshot.airline.trim().toLowerCase();
+            const collectionDate = snapshot.collectionDate ?? snapshot.collectedAt.slice(0, 10);
+            return (snapshot.sourceType === 'airline' || snapshot.sourceType === 'ota' || snapshot.sourceType === 'duffel')
+                && allowedAirlines.has(airline)
+                && Number.isFinite(snapshot.price)
+                && snapshot.price > 0
+                && collectionDate >= cutoffDate
+                && collectionDate <= now.toISOString().slice(0, 10);
+        });
+    }
+    getRawSnapshots() {
+        return [...this.rawSnapshots];
+    }
+    getRejectedSnapshots() {
+        return [...this.rejectedSnapshots];
+    }
+    getIndexHistory() {
+        return [...this.indexHistory];
+    }
     getSummaries(origin, destination, departureDate) {
         const filtered = this.snapshots.filter((snapshot) => {
+            if (snapshot.sourceType === 'aggregated') {
+                return false;
+            }
             if (origin && snapshot.origin !== origin.toUpperCase()) {
                 return false;
             }
@@ -344,14 +527,20 @@ class FareStore {
         const normalizedDestination = destination.trim().toUpperCase();
         const normalizedDate = departureDate.trim();
         const exactRouteKey = routeKeyFrom(normalizedOrigin, normalizedDestination, normalizedDate);
-        const exactMatches = this.snapshots.filter((snapshot) => snapshot.routeKey === exactRouteKey);
-        const routeMatches = exactMatches.length > 0
-            ? exactMatches
-            : this.snapshots.filter((snapshot) => snapshot.origin === normalizedOrigin && snapshot.destination === normalizedDestination);
-        return snapshotsToOffers(routeMatches, adults);
+        const exactMatches = this.snapshots.filter((snapshot) => snapshot.routeKey === exactRouteKey && snapshot.sourceType === 'duffel');
+        return snapshotsToOffers(exactMatches, adults);
     }
-    replaceSnapshots(snapshots) {
-        this.snapshots = snapshots.map(normalizeSnapshot);
+    replaceSnapshots(snapshots, rejectedSnapshots = [], rawSnapshots = snapshots) {
+        const merge = (existing, incoming) => {
+            const merged = new Map(existing.map((snapshot) => [`${snapshot.id}|${snapshot.collectionDate}|${snapshot.price}`, snapshot]));
+            for (const snapshot of incoming.map(normalizeSnapshot)) {
+                merged.set(`${snapshot.id}|${snapshot.collectionDate}|${snapshot.price}`, snapshot);
+            }
+            return [...merged.values()];
+        };
+        this.snapshots = merge(this.snapshots, snapshots);
+        this.rawSnapshots = merge(this.rawSnapshots, rawSnapshots);
+        this.rejectedSnapshots = merge(this.rejectedSnapshots, rejectedSnapshots);
     }
     upsertSnapshots(snapshots) {
         const existing = new Map(this.snapshots.map((snapshot) => [snapshot.id, snapshot]));
@@ -360,11 +549,54 @@ class FareStore {
         }
         this.snapshots = [...existing.values()].sort((left, right) => left.id.localeCompare(right.id));
     }
-    async persist() {
+    upsertOffers(offers) {
+        const snapshots = offers.map((offer) => ({
+            id: observationId(offer),
+            routeKey: routeKeyFrom(offer.origin, offer.destination, offer.departureDate),
+            origin: offer.origin,
+            destination: offer.destination,
+            departureDate: offer.departureDate,
+            bookingWindowDays: 0,
+            collectionDate: offer.collectedAt.slice(0, 10),
+            collectedAt: offer.collectedAt,
+            sourceId: offer.source,
+            airline: offer.airline,
+            airlineCode: offer.airlineCode,
+            flightNumber: offer.flightNumber,
+            departureTime: offer.departureTime,
+            arrivalTime: offer.arrivalTime,
+            durationMinutes: durationToMinutes(offer.duration),
+            stops: offer.stops,
+            price: offer.price,
+            baseFare: offer.baseFare,
+            taxes: offer.taxes,
+            udf: offer.udf,
+            convenienceFee: offer.convenienceFee,
+            totalFare: offer.totalFare,
+            currency: offer.currency,
+            seatsRemaining: offer.seatsRemaining,
+            source: offer.source,
+            collectionStage: 'SEARCH',
+            sourceType: offer.sourceType,
+            confidence: offer.confidence,
+            dataQualityStatus: 'valid',
+        }));
+        this.upsertSnapshots(snapshots);
+        const rawById = new Map(this.rawSnapshots.map((snapshot) => [snapshot.id, snapshot]));
+        for (const snapshot of snapshots) {
+            rawById.set(snapshot.id, normalizeSnapshot(snapshot));
+        }
+        this.rawSnapshots = [...rawById.values()];
+    }
+    async persist(indexSnapshots = []) {
+        this.indexHistory.push(...indexSnapshots);
         await this.persistToFile();
-        await this.syncToDatabase().catch((error) => {
+        await this.syncToDatabase(indexSnapshots).catch((error) => {
             console.warn('Skipping PostgreSQL sync for fare snapshots', error);
         });
     }
+}
+function rawRecordKey(snapshot) {
+    return [snapshot.id, snapshot.routeKey, snapshot.collectedAt, snapshot.price].join('|');
 }
 export const fareStore = new FareStore();

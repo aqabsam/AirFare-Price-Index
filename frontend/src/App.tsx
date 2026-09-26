@@ -9,6 +9,7 @@ import { AnalyticsPage } from '@/pages/AnalyticsPage'
 import { DataExplorerPage } from '@/pages/DataExplorerPage'
 import { ResultsPage } from '@/pages/ResultsPage'
 import { LiveMapPage } from '@/pages/LiveMapPage'
+import { SearchStateProvider } from '@/state/SearchState'
 
 function AppShell() {
   const location = useLocation()
@@ -44,8 +45,11 @@ function AppShell() {
           <Route path="/" element={<HomePage theme={theme} />} />
           <Route path="/search" element={<SearchPage theme={theme} />} />
           <Route path="/index" element={<AirfareIndexPage theme={theme} />} />
+          <Route path="/airfare-index" element={<AirfareIndexPage theme={theme} />} />
+          <Route path="/airfare" element={<AirfareIndexPage theme={theme} />} />
           <Route path="/analytics" element={<AnalyticsPage theme={theme} />} />
           <Route path="/explorer" element={<DataExplorerPage theme={theme} />} />
+          <Route path="/data-explorer" element={<DataExplorerPage theme={theme} />} />
           <Route path="/results" element={<ResultsPage />} />
           <Route path="/map" element={<LiveMapPage theme={theme} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
@@ -60,7 +64,9 @@ function AppShell() {
 function App() {
   return (
     <BrowserRouter>
-      <AppShell />
+      <SearchStateProvider>
+        <AppShell />
+      </SearchStateProvider>
     </BrowserRouter>
   )
 }

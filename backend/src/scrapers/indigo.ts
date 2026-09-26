@@ -2,7 +2,7 @@ import { scrapeWebsite } from './shared.js'
 import type { WebsiteScraper } from './types.js'
 
 export function createIndigoScraper(): WebsiteScraper | null {
-  const url = process.env.SCRAPER_INDIGO_URL?.trim()
+  const url = process.env.SCRAPER_INDIGO_URL?.trim() || 'https://www.goindigo.in/flights'
   if (!url) return null
   const definition = {
     id: 'indigo', name: 'IndiGo website', sourceType: 'airline' as const, airline: 'IndiGo', airlineCode: '6E', url,

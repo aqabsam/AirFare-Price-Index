@@ -10,7 +10,6 @@ const DATA_FILE = path.join(DATA_DIR, 'fare-snapshots.json')
 const DATABASE_URL = process.env.DATABASE_URL?.trim() || ''
 const DATABASE_SSL = process.env.DATABASE_SSL?.trim().toLowerCase() === 'require'
 const ALLOW_FILE_CACHE = process.env.FARE_ALLOW_FILE_CACHE?.trim().toLowerCase() === 'true'
-const ALLOW_DEMO_DATA = process.env.FARE_ALLOW_DEMO_DATA?.trim().toLowerCase() === 'true'
 
 type DbFareRow = {
   id: string
@@ -83,6 +82,15 @@ function formatDuration(minutes: number) {
   return `${hours}h ${String(remainder).padStart(2, '0')}m`
 }
 
+function durationToMinutes(duration: string) {
+  const match = duration.match(/^(\d+)h\s+(\d{2})m$/i)
+  if (!match) {
+    return 0
+  }
+
+  return Number(match[1]) * 60 + Number(match[2])
+}
+
 export function snapshotsToOffers(snapshots: FareSnapshot[], adults: number): NormalizedFlightOffer[] {
   return snapshots
     .filter((snapshot) => snapshot.seatsRemaining <= 0 || snapshot.seatsRemaining >= adults)
@@ -95,11 +103,18 @@ export function snapshotsToOffers(snapshots: FareSnapshot[], adults: number): No
         flightNumber: snapshot.flightNumber,
         origin: snapshot.origin,
         destination: snapshot.destination,
+        departureDate: snapshot.departureDate,
+        liveMode: false,
         departureTime: snapshot.departureTime,
         arrivalTime: snapshot.arrivalTime,
         duration: formatDuration(snapshot.durationMinutes),
         stops: snapshot.stops,
         price: snapshot.price * adults,
+        baseFare: snapshot.baseFare === null || snapshot.baseFare === undefined ? null : snapshot.baseFare * adults,
+        taxes: snapshot.taxes === null || snapshot.taxes === undefined ? null : snapshot.taxes * adults,
+        udf: snapshot.udf === null || snapshot.udf === undefined ? null : snapshot.udf * adults,
+        convenienceFee: snapshot.convenienceFee === null || snapshot.convenienceFee === undefined ? null : snapshot.convenienceFee * adults,
+        totalFare: snapshot.totalFare === null || snapshot.totalFare === undefined ? null : snapshot.totalFare * adults,
         currency: snapshot.currency,
         offerId: snapshot.id,
         seatsRemaining: snapshot.seatsRemaining,
@@ -115,7 +130,7 @@ export function snapshotsToOffers(snapshots: FareSnapshot[], adults: number): No
 function snapshotsToDemoOffers(snapshots: FareSnapshot[], adults: number): NormalizedFlightOffer[] {
   return snapshotsToOffers(snapshots, adults).map((offer) => ({
     ...offer,
-    source: 'Demo data',
+    source: 'Demo Data (Fallback)',
     sourceType: 'demo',
   }))
 }
@@ -146,6 +161,10 @@ function median(values: number[]) {
 
 function routeKeyFrom(origin: string, destination: string, departureDate: string) {
   return `${origin.toUpperCase()}-${destination.toUpperCase()}-${departureDate}`
+}
+
+function observationId(offer: NormalizedFlightOffer) {
+  return `${offer.offerId}|${offer.collectedAt}`
 }
 
 function normalizeSnapshot(snapshot: FareSnapshot): FareSnapshot {
@@ -561,7 +580,7 @@ class FareStore {
       return
     }
 
-    if (ALLOW_FILE_CACHE) {
+    if (ALLOW_FILE_CACHE || !DATABASE_URL) {
       try {
         const raw = await readFile(DATA_FILE, 'utf8')
         const parsed = JSON.parse(raw) as FareCatalogResponse | FareSnapshot[]
@@ -576,7 +595,7 @@ class FareStore {
       }
     }
 
-    const fallbackSnapshots = ALLOW_DEMO_DATA && DEFAULT_FARE_SNAPSHOTS.length ? DEFAULT_FARE_SNAPSHOTS : []
+    const fallbackSnapshots = DEFAULT_FARE_SNAPSHOTS.length ? DEFAULT_FARE_SNAPSHOTS : []
     if (fallbackSnapshots.length > 0) {
       this.snapshots = fallbackSnapshots.map(normalizeSnapshot)
       this.rawSnapshots = [...this.snapshots]
@@ -590,6 +609,25 @@ class FareStore {
 
   getSnapshots() {
     return [...this.snapshots]
+  }
+
+  getHistoricalSnapshots(days = 30, now = new Date()) {
+    const cutoff = new Date(now)
+    cutoff.setUTCHours(0, 0, 0, 0)
+    cutoff.setUTCDate(cutoff.getUTCDate() - Math.max(0, days - 1))
+    const cutoffDate = cutoff.toISOString().slice(0, 10)
+    const allowedAirlines = new Set(['indigo', 'goair', 'gofirst', 'air india', 'akasa air', 'spicejet'])
+
+    return this.snapshots.filter((snapshot) => {
+      const airline = snapshot.airline.trim().toLowerCase()
+      const collectionDate = snapshot.collectionDate ?? snapshot.collectedAt.slice(0, 10)
+      return (snapshot.sourceType === 'airline' || snapshot.sourceType === 'ota' || snapshot.sourceType === 'duffel')
+        && allowedAirlines.has(airline)
+        && Number.isFinite(snapshot.price)
+        && snapshot.price > 0
+        && collectionDate >= cutoffDate
+        && collectionDate <= now.toISOString().slice(0, 10)
+    })
   }
 
   getRawSnapshots() {
@@ -643,14 +681,22 @@ class FareStore {
     const normalizedDestination = destination.trim().toUpperCase()
     const normalizedDate = departureDate.trim()
     const exactRouteKey = routeKeyFrom(normalizedOrigin, normalizedDestination, normalizedDate)
-    const exactMatches = this.snapshots.filter((snapshot) => snapshot.routeKey === exactRouteKey && snapshot.sourceType === 'aggregated')
+    const exactMatches = DEFAULT_FARE_SNAPSHOTS.filter((snapshot) => snapshot.routeKey === exactRouteKey && snapshot.sourceType === 'demo')
     return snapshotsToDemoOffers(exactMatches, adults)
   }
 
   replaceSnapshots(snapshots: FareSnapshot[], rejectedSnapshots: FareSnapshot[] = [], rawSnapshots: FareSnapshot[] = snapshots) {
-    this.snapshots = snapshots.map(normalizeSnapshot)
-    this.rawSnapshots = rawSnapshots.map(normalizeSnapshot)
-    this.rejectedSnapshots = rejectedSnapshots.map(normalizeSnapshot)
+    const merge = (existing: FareSnapshot[], incoming: FareSnapshot[]) => {
+      const merged = new Map(existing.map((snapshot) => [`${snapshot.id}|${snapshot.collectionDate}|${snapshot.price}`, snapshot] as const))
+      for (const snapshot of incoming.map(normalizeSnapshot)) {
+        merged.set(`${snapshot.id}|${snapshot.collectionDate}|${snapshot.price}`, snapshot)
+      }
+      return [...merged.values()]
+    }
+
+    this.snapshots = merge(this.snapshots, snapshots)
+    this.rawSnapshots = merge(this.rawSnapshots, rawSnapshots)
+    this.rejectedSnapshots = merge(this.rejectedSnapshots, rejectedSnapshots)
   }
 
   upsertSnapshots(snapshots: FareSnapshot[]) {
@@ -661,6 +707,47 @@ class FareStore {
     }
 
     this.snapshots = [...existing.values()].sort((left, right) => left.id.localeCompare(right.id))
+  }
+
+  upsertOffers(offers: NormalizedFlightOffer[]) {
+    const snapshots = offers.map((offer) => ({
+      id: observationId(offer),
+      routeKey: routeKeyFrom(offer.origin, offer.destination, offer.departureDate),
+      origin: offer.origin,
+      destination: offer.destination,
+      departureDate: offer.departureDate,
+      bookingWindowDays: 0,
+      collectionDate: offer.collectedAt.slice(0, 10),
+      collectedAt: offer.collectedAt,
+      sourceId: offer.source,
+      airline: offer.airline,
+      airlineCode: offer.airlineCode,
+      flightNumber: offer.flightNumber,
+      departureTime: offer.departureTime,
+      arrivalTime: offer.arrivalTime,
+      durationMinutes: durationToMinutes(offer.duration),
+      stops: offer.stops,
+      price: offer.price,
+      baseFare: offer.baseFare,
+      taxes: offer.taxes,
+      udf: offer.udf,
+      convenienceFee: offer.convenienceFee,
+      totalFare: offer.totalFare,
+      currency: offer.currency,
+      seatsRemaining: offer.seatsRemaining,
+      source: offer.source,
+      collectionStage: 'SEARCH',
+      sourceType: offer.sourceType,
+      confidence: offer.confidence,
+      dataQualityStatus: 'valid',
+    } satisfies FareSnapshot))
+
+    this.upsertSnapshots(snapshots)
+    const rawById = new Map(this.rawSnapshots.map((snapshot) => [snapshot.id, snapshot] as const))
+    for (const snapshot of snapshots) {
+      rawById.set(snapshot.id, normalizeSnapshot(snapshot))
+    }
+    this.rawSnapshots = [...rawById.values()]
   }
 
   async persist(indexSnapshots: IndexSnapshotRecord[] = []) {

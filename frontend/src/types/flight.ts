@@ -5,10 +5,27 @@ export type FlightSearchInput = {
   adults: number
 }
 
+export type FlightSegment = {
+  airline: string
+  airlineCode: string
+  marketingAirline: string | null
+  marketingAirlineCode: string | null
+  operatingAirline: string | null
+  operatingAirlineCode: string | null
+  flightNumber: string
+  origin: string
+  destination: string
+  departureDate: string
+  departureTime: string
+  arrivalDate: string
+  arrivalTime: string
+}
+
 export type FlightOffer = {
   airline: string
   airlineCode: string
   flightNumber: string
+  segments?: FlightSegment[]
   origin: string
   destination: string
   departureTime: string
@@ -31,6 +48,8 @@ export type FlightOffer = {
 }
 
 export type FlightSearchStatus =
+  | 'no_results'
+  | 'live_success'
   | 'duffel_success'
   | 'duffel_empty_with_fallback'
   | 'duffel_empty_no_fallback'

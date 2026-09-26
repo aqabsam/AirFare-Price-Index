@@ -11,6 +11,8 @@ import type {
 } from '../types/fare.js'
 
 const routeBasket = (process.env.AIRFARE_ROUTE_BASKET ?? '').split(',').map((route) => route.trim().toUpperCase()).filter(Boolean)
+const INDEX_SCALE = Number(process.env.AIRFARE_INDEX_SCALE ?? '100')
+const APPROVED_AIRLINES = new Set(['IndiGo', 'GoAir', 'Air India', 'Akasa Air', 'SpiceJet'])
 const configuredWeights = (() => {
   try {
     const parsed = JSON.parse(process.env.DGCA_ROUTE_WEIGHTS ?? '{}') as Record<string, number>
@@ -49,8 +51,20 @@ function positiveMin(values: number[]) {
   return positiveValues.length ? Math.min(...positiveValues) : 0
 }
 
+function normalizeApprovedAirline(name: string, code: string) {
+  const normalizedName = name.trim().toLowerCase().replace(/[^a-z]/g, '')
+  const normalizedCode = code.trim().toUpperCase()
+
+  if (normalizedCode === '6E' || normalizedName === 'indigo' || normalizedName === 'indigoairlines') return 'IndiGo'
+  if (normalizedCode === 'G8' || normalizedName === 'goair' || normalizedName === 'gofirst') return 'GoAir'
+  if (normalizedCode === 'AI' || normalizedName === 'airindia') return 'Air India'
+  if (normalizedCode === 'QP' || normalizedName === 'akasa' || normalizedName === 'akasaair') return 'Akasa Air'
+  if (normalizedCode === 'SG' || normalizedName === 'spicejet') return 'SpiceJet'
+  return null
+}
+
 function matchesFilters(snapshot: FareSnapshot, origin?: string, destination?: string, departureDate?: string) {
-  if (snapshot.sourceType === 'aggregated' || snapshot.sourceType === 'demo' || snapshot.price <= 0) {
+  if (snapshot.sourceType === 'aggregated' || snapshot.sourceType === 'demo' || snapshot.price <= 0 || !normalizeApprovedAirline(snapshot.airline, snapshot.airlineCode)) {
     return false
   }
 
@@ -88,7 +102,7 @@ function baselinePrice(snapshots: FareSnapshot[]) {
 }
 
 function indexForPrice(price: number, baseline: number) {
-  return baseline > 0 ? Math.round((price / baseline) * 100) : null
+  return baseline > 0 && Number.isFinite(INDEX_SCALE) && INDEX_SCALE > 0 ? Math.round((price / baseline) * INDEX_SCALE) : null
 }
 
 function summarizeRoutes(snapshots: FareSnapshot[], baseline: number): FareRouteSummary[] {
@@ -128,7 +142,7 @@ function summarizeRoutes(snapshots: FareSnapshot[], baseline: number): FareRoute
         medianPrice: Math.round(median(routePrices)),
         airfareIndex: cheapest ? indexForPrice(cheapest.price, baseline) : null,
         currency: cheapest?.currency ?? 'INR',
-        topCarrier: topCarrier?.airline ?? 'Unknown airline',
+        topCarrier: topCarrier ? normalizeApprovedAirline(topCarrier.airline, topCarrier.airlineCode) ?? 'Unknown airline' : 'Unknown airline',
         lastCollectedAt: latest?.collectedAt ?? '',
         changePercent: previousPrice > 0 && cheapest ? Math.round(((cheapest.price - previousPrice) / previousPrice) * 10000) / 100 : null,
       } satisfies FareRouteSummary
@@ -364,6 +378,8 @@ export function calculateFareAnalytics(origin?: string, destination?: string, de
   const monthlyIndex = buildPeriodIndex(snapshots, 'month', baseline)
   const heatmap = buildHeatmap(snapshots, baseline)
   const sourceComparison = buildSourceComparison(snapshots)
+  const basePeriod = dailyIndex[0]?.collectionDate ?? null
+  const baseValue = dailyIndex[0]?.airfareIndex ?? null
 
   return {
     summary,
@@ -374,13 +390,11 @@ export function calculateFareAnalytics(origin?: string, destination?: string, de
     heatmap,
     sourceComparison,
     base: {
-      value: snapshots.length ? 100 : null,
-      period: snapshots.length
-        ? [...snapshots].sort((left, right) => (left.collectionDate ?? '').localeCompare(right.collectionDate ?? ''))[0]?.collectionDate ?? null
-        : null,
+      value: baseValue,
+      period: basePeriod,
     },
     methodology: {
-      basePeriod: snapshots.length ? [...snapshots].sort((left, right) => (left.collectionDate ?? '').localeCompare(right.collectionDate ?? ''))[0]?.collectionDate ?? null : null,
+      basePeriod,
       routeBasket,
       routeWeights: configuredWeights,
       officialSources: ['airline', 'ota', 'duffel'],

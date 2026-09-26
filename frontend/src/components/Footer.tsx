@@ -82,7 +82,7 @@ export function Footer({ theme }: FooterProps) {
                   { to: '/search', label: 'Search', icon: Search },
                   { to: '/index', label: 'Airfare Index', icon: PlaneTakeoff },
                   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
-                  { to: '/explorer', label: 'Data Explorer', icon: Database },
+                  { to: '/data-explorer', label: 'Data Explorer', icon: Database },
                 ].map((item) => (
                   <Link
                     key={item.to}
@@ -213,7 +213,7 @@ export function Footer({ theme }: FooterProps) {
                     Analytics
                   </Link>
                   <Link
-                    to="/explorer"
+                    to="/data-explorer"
                     className={`rounded-2xl border px-4 py-4 text-sm font-medium transition hover:-translate-y-0.5 ${
                       theme === 'dark'
                         ? 'border-white/10 bg-white/5 text-white hover:bg-white/10'

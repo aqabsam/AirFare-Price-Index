@@ -26,7 +26,7 @@ export type FareSnapshot = {
   source: string
   sourceType: 'airline' | 'ota' | 'duffel' | 'demo' | 'aggregated'
   fareClass?: string | null
-  collectionStage?: 'SCRAPER' | 'DUFFEL' | 'DEMO'
+  collectionStage?: 'SEARCH' | 'SCRAPER' | 'DUFFEL' | 'DEMO'
   soldOut?: boolean
   dataQualityScore?: number | null
   dataQualityStatus?: 'valid' | 'missing' | 'invalid' | 'outlier' | 'duplicate'
@@ -131,7 +131,32 @@ export type DgcaBacktestResponse = {
   message: string
 }
 
+export type DgcaAnalyticsResponse = {
+  available: boolean
+  source: 'DGCA-DATA.pdf'
+  report: {
+    subject: string
+    reportingMonth: string
+    reportingMonthLabel: string
+    pageCount: number
+  } | null
+  monthlyPassengerLoadFactors: Array<{
+    month: string
+    airline: string
+    percent: number
+    page: number
+  }>
+  fareObservations: unknown[]
+  fareAnalysisMessage: string
+}
+
 export type FareSnapshotsResponse = {
+  snapshots: FareSnapshot[]
+}
+
+export type FareHistoryResponse = {
+  days: number
+  collectionDates: string[]
   snapshots: FareSnapshot[]
 }
 
@@ -155,7 +180,7 @@ export type FareAnalyticsResponse = {
     basePeriod: string | null
     routeBasket: string[]
     routeWeights: Record<string, number>
-    officialSources: Array<'airline' | 'ota' | 'duffel'>
+    officialSources: string[]
   }
 }
 
@@ -171,7 +196,7 @@ export type FareIndexHistoryResponse = {
     cheapestPrice: number
     averagePrice: number
     medianPrice: number
-    airfareIndex: number
+    airfareIndex: number | null
     calculatedAt: string
   }>
 }
@@ -208,7 +233,7 @@ export type FareExplorerResponse = {
     cheapestPrice: number
     averagePrice: number
     medianPrice: number
-    airfareIndex: number
+    airfareIndex: number | null
     calculatedAt: string
   }>
   collectionStatus: FareCollectionStatus
@@ -227,7 +252,7 @@ export type FareExplorerResponse = {
 export type FareSourceHealth = {
   id: string
   name: string
-  sourceType: 'airline' | 'ota' | 'aggregated'
+  sourceType: 'airline' | 'ota' | 'duffel' | 'aggregated'
   kind: 'page' | 'api'
   url: string
   routeCount: number
