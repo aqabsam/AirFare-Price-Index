@@ -236,6 +236,12 @@ export function normalizeDuffelOffer(
   for (const segment of segments) {
     const operatingCarrier = segment.operating_carrier
     const marketingCarrier = segment.marketing_carrier
+<<<<<<< HEAD
+    const operatingHasCode = Boolean(cleanAirlineCode(operatingCarrier?.iata_code))
+    const actualCarrier = operatingHasCode ? operatingCarrier : marketingCarrier
+    const airlineCode = rawCarrierCode(actualCarrier?.iata_code)
+    const airline = canonicalAirlineNames[airlineCode] ?? ''
+=======
     // Duffel exposes both the commercial (marketing) flight and the carrier
     // physically operating it. Prefer the verified marketing identity with
     // its matching flight number; use the operating identity only when the
@@ -255,12 +261,27 @@ export function normalizeDuffelOffer(
     const actualCarrier = selected?.carrier
     const airlineCode = selected?.code ?? ''
     const airline = selected?.name ?? ''
+>>>>>>> f17ecdb (Fix airline offer validation and demo presentation)
     if (!airline || !airlineCode || isProviderBrandName(airline) || (actualCarrier?.country_code && actualCarrier.country_code.trim().toUpperCase() !== 'IN')) {
       return rejectOffer(diagnostics, 'invalid_carrier')
     }
 
+<<<<<<< HEAD
+    const operatingCode = cleanAirlineCode(operatingCarrier?.iata_code)
+    const marketingCode = cleanAirlineCode(marketingCarrier?.iata_code)
+    const operatingFlightNumber = normalizeFlightNumber(operatingCode, segment.operating_carrier_flight_number)
+    const marketingFlightNumber = normalizeFlightNumber(marketingCode, segment.marketing_carrier_flight_number)
+    const flightNumber = operatingFlightNumber?.startsWith(operatingCode)
+      ? operatingFlightNumber
+      : marketingFlightNumber?.startsWith(marketingCode)
+        ? marketingFlightNumber
+        : null
+    const flightNumberCarrierCode = operatingFlightNumber?.startsWith(operatingCode)
+      ? operatingCode
+      : marketingCode
+=======
     const flightNumber = selected?.flightNumber
-    const flightNumberCarrierCode = selected?.code ?? ''
+>>>>>>> f17ecdb (Fix airline offer validation and demo presentation)
     if (!flightNumber) return rejectOffer(diagnostics, 'invalid_flight_number')
 
     const origin = segment.origin?.iata_code?.trim().toUpperCase() ?? ''
