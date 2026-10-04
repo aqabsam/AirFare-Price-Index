@@ -25,8 +25,6 @@ const canonicalAirlineNames: Record<string, string> = {
   IX: 'Air India Express',
   QP: 'Akasa Air',
   SG: 'SpiceJet',
-  '9I': 'Alliance Air',
-  S5: 'Star Air',
 }
 
 type DuffelSegment = {
@@ -238,26 +236,31 @@ export function normalizeDuffelOffer(
   for (const segment of segments) {
     const operatingCarrier = segment.operating_carrier
     const marketingCarrier = segment.marketing_carrier
-    const operatingHasCode = Boolean(cleanAirlineCode(operatingCarrier?.iata_code))
-    const actualCarrier = operatingHasCode ? operatingCarrier : marketingCarrier
-    const airlineCode = rawCarrierCode(actualCarrier?.iata_code)
-    const airline = canonicalAirlineNames[airlineCode] ?? ''
+    // Duffel exposes both the commercial (marketing) flight and the carrier
+    // physically operating it. Prefer the verified marketing identity with
+    // its matching flight number; use the operating identity only when the
+    // marketing carrier is not one of the supported Indian airlines.
+    const carrierCandidates = [
+      { carrier: marketingCarrier, numbers: [segment.marketing_carrier_flight_number, segment.flight_number] },
+      { carrier: operatingCarrier, numbers: [segment.operating_carrier_flight_number, segment.flight_number] },
+    ]
+    const selected = carrierCandidates.map(({ carrier, numbers }) => {
+      const code = rawCarrierCode(carrier?.iata_code)
+      const country = carrier?.country_code?.trim().toUpperCase()
+      const name = canonicalAirlineNames[code] ?? carrier?.name?.trim() ?? ''
+      const flightNumber = numbers.map((candidate) => normalizeFlightNumber(code, candidate))
+        .find((candidate): candidate is string => candidate !== null && candidate.startsWith(code))
+      return { carrier, code, country, name, flightNumber }
+    }).find((candidate) => Boolean(candidate.code && canonicalAirlineNames[candidate.code] && candidate.flightNumber && (!candidate.country || candidate.country === 'IN')))
+    const actualCarrier = selected?.carrier
+    const airlineCode = selected?.code ?? ''
+    const airline = selected?.name ?? ''
     if (!airline || !airlineCode || isProviderBrandName(airline) || (actualCarrier?.country_code && actualCarrier.country_code.trim().toUpperCase() !== 'IN')) {
       return rejectOffer(diagnostics, 'invalid_carrier')
     }
 
-    const operatingCode = cleanAirlineCode(operatingCarrier?.iata_code)
-    const marketingCode = cleanAirlineCode(marketingCarrier?.iata_code)
-    const operatingFlightNumber = normalizeFlightNumber(operatingCode, segment.operating_carrier_flight_number)
-    const marketingFlightNumber = normalizeFlightNumber(marketingCode, segment.marketing_carrier_flight_number)
-    const flightNumber = operatingFlightNumber?.startsWith(operatingCode)
-      ? operatingFlightNumber
-      : marketingFlightNumber?.startsWith(marketingCode)
-        ? marketingFlightNumber
-        : null
-    const flightNumberCarrierCode = operatingFlightNumber?.startsWith(operatingCode)
-      ? operatingCode
-      : marketingCode
+    const flightNumber = selected?.flightNumber
+    const flightNumberCarrierCode = selected?.code ?? ''
     if (!flightNumber) return rejectOffer(diagnostics, 'invalid_flight_number')
 
     const origin = segment.origin?.iata_code?.trim().toUpperCase() ?? ''

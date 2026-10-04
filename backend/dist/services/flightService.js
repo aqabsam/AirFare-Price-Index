@@ -12,8 +12,6 @@ const INDIAN_CARRIERS = [
     { name: 'Air India Express', code: 'IX', aliases: ['airindiaexpress', 'airindiaexpresslimited'] },
     { name: 'Akasa Air', code: 'QP', aliases: ['akasa', 'akasaair', 'akasaairlines'] },
     { name: 'SpiceJet', code: 'SG', aliases: ['spicejet', 'spicejetlimited'] },
-    { name: 'Alliance Air', code: '9I', aliases: ['allianceair', 'allianceairlimited'] },
-    { name: 'Star Air', code: 'S5', aliases: ['starair', 'starairlines'] },
 ];
 function verifiedIndianAirline(name, code) {
     const normalizedName = name.trim().toLowerCase().replace(/[^a-z]/g, '');
@@ -31,7 +29,7 @@ export function hasMatchingFlightCarrier(offer) {
     if (offer.segments?.length) {
         return offer.segments.every((segment) => {
             const flightNumber = segment.flightNumber.replace(/[\s-]/g, '').toUpperCase();
-            const airlineCode = segment.airlineCode.trim().toUpperCase();
+            const airlineCode = segment.flightNumberCarrierCode.trim().toUpperCase();
             return /^[A-Z0-9]{2,3}\d{2,5}$/.test(flightNumber) && flightNumber.startsWith(airlineCode);
         });
     }
@@ -63,27 +61,16 @@ function validateRequest(input) {
 }
 export function deduplicateOffers(offers) {
     const unique = new Map();
-    const sourcePriority = { airline: 3, duffel: 2, ota: 1, aggregated: 0, demo: 0 };
     for (const offer of offers) {
-        const identity = [
-            offer.airlineCode || offer.airline,
-            offer.flightNumber.replace(/[^a-z0-9]/gi, ''),
-            offer.origin,
-            offer.destination,
-            offer.departureDate,
-            offer.departureTime,
-            offer.arrivalTime,
-            offer.duration,
-            offer.stops,
-        ].join('|').toUpperCase();
+        const identity = offer.segments?.length
+            ? offer.segments.map((segment) => [segment.airlineCode, segment.flightNumber, segment.operatingAirlineCode ?? '', segment.operatingAirline ?? '', segment.origin, segment.destination, segment.departureDate, segment.departureTime, segment.arrivalDate, segment.arrivalTime].join(':')).join('~').toUpperCase()
+            : [offer.airlineCode || offer.airline, offer.flightNumber.replace(/[^a-z0-9]/gi, ''), offer.origin, offer.destination, offer.departureDate, offer.departureTime, offer.arrivalTime].join('|').toUpperCase();
         const current = unique.get(identity);
-        const priority = sourcePriority[offer.sourceType];
-        const currentPriority = current ? sourcePriority[current.sourceType] : -1;
-        if (!current || priority > currentPriority || (priority === currentPriority && comparablePriceInINR(offer) < comparablePriceInINR(current)) || (priority === currentPriority && comparablePriceInINR(offer) === comparablePriceInINR(current) && offer.confidence > current.confidence)) {
+        if (!current || comparablePriceInINR(offer) < comparablePriceInINR(current)) {
             unique.set(identity, offer);
         }
     }
-    return [...unique.values()].sort((left, right) => left.departureTime.localeCompare(right.departureTime) || comparablePriceInINR(left) - comparablePriceInINR(right));
+    return [...unique.values()].sort((left, right) => comparablePriceInINR(left) - comparablePriceInINR(right));
 }
 export function timestampSearchOffers(offers, collectedAt = new Date().toISOString()) {
     return offers.map((offer) => ({ ...offer, collectedAt }));
@@ -267,7 +254,6 @@ async function searchLiveAirlineOffers(input) {
 export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffelOffers) {
     const { origin, destination, departureDate } = validateRequest(input);
     const searchInput = { ...input, origin, destination, departureDate };
-    console.info('[LIVE DATA] Source: Duffel API');
     console.info('[Flight Search] Live web scraping disabled');
     console.info('[Flight Search] Using Duffel API');
     const accessToken = getDuffelAccessToken();
@@ -277,9 +263,8 @@ export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffel
         console.info('[Duffel] Valid offers before airline filtering: 0');
         console.info('[Duffel] Rejected offers: 0');
         console.info('[Duffel] Verified offers: 0');
-        console.info('[LIVE DATA] No verified Duffel offers available');
         console.info('[Flight Search] Final merged result count=0 source=duffel');
-        return { offers: [], status: 'no_results', message: 'No verified flights available for this search.' };
+        return { offers: [], status: 'no_results', message: 'No flights available for this search.' };
     }
     console.info(`[Duffel] Searching ${origin}-${destination} for ${departureDate}, passengers=${searchInput.adults}`);
     try {
@@ -291,11 +276,33 @@ export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffel
             validationSummary = summary;
         });
         const rejections = {};
+        const diagnosticStages = {
+            normalized: duffelOffers.length,
+            liveDuffelMode: 0,
+            validProvenance: 0,
+            validIndianCarrier: 0,
+            validOfferFlightNumber: 0,
+            matchingOfferRoute: 0,
+            connectedSegmentRoute: 0,
+            validSegmentFlightNumbers: 0,
+            matchingItineraryFlightNumber: 0,
+            matchingDepartureDate: 0,
+            matchingSegmentSchedule: 0,
+            validScheduleFormat: 0,
+            validDurationAndStops: 0,
+            validFare: 0,
+        };
         const verifiedOffers = duffelOffers.flatMap((offer) => {
+            if (!offer.liveMode) {
+                recordRejection(rejections, 'non-live Duffel offer');
+                return [];
+            }
+            diagnosticStages.liveDuffelMode += 1;
             if (offer.sourceType !== 'duffel') {
                 recordRejection(rejections, 'invalid Duffel source provenance');
                 return [];
             }
+            diagnosticStages.validProvenance += 1;
             const segments = offer.segments ?? [];
             const carriers = segments.length
                 ? [...new Map(segments.map((segment) => [segment.airlineCode, verifiedIndianAirline(segment.airline, segment.airlineCode)])).values()]
@@ -304,46 +311,57 @@ export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffel
                 recordRejection(rejections, 'invalid or non-Indian operating airline');
                 return [];
             }
+            diagnosticStages.validIndianCarrier += 1;
             if (!hasMatchingFlightCarrier(offer)) {
                 recordRejection(rejections, 'flight number carrier mismatch');
                 return [];
             }
+            diagnosticStages.validOfferFlightNumber += 1;
             if (offer.origin !== origin || offer.destination !== destination) {
                 recordRejection(rejections, 'route mismatch');
                 return [];
             }
+            diagnosticStages.matchingOfferRoute += 1;
             if (segments[0]?.origin !== origin || segments.at(-1)?.destination !== destination || segments.some((segment, index) => index > 0 && segments[index - 1]?.destination !== segment.origin)) {
                 recordRejection(rejections, 'segment route mismatch');
                 return [];
             }
-            if (segments.some((segment) => !hasMatchingFlightCarrier({ ...offer, airline: segment.airline, airlineCode: segment.airlineCode, flightNumber: segment.flightNumber, segments: undefined }))) {
+            diagnosticStages.connectedSegmentRoute += 1;
+            if (segments.some((segment) => !hasMatchingFlightCarrier({ ...offer, airline: segment.airline, airlineCode: segment.flightNumberCarrierCode, flightNumber: segment.flightNumber, segments: undefined }))) {
                 recordRejection(rejections, 'segment flight number mismatch');
                 return [];
             }
+            diagnosticStages.validSegmentFlightNumbers += 1;
             if (offer.flightNumber !== segments.map((segment) => segment.flightNumber).join(' / ')) {
                 recordRejection(rejections, 'itinerary flight number mismatch');
                 return [];
             }
+            diagnosticStages.matchingItineraryFlightNumber += 1;
             if (offer.departureDate !== departureDate) {
                 recordRejection(rejections, 'travel date mismatch');
                 return [];
             }
+            diagnosticStages.matchingDepartureDate += 1;
             if (segments[0]?.departureDate !== departureDate || segments[0]?.departureTime !== offer.departureTime || segments.at(-1)?.arrivalTime !== offer.arrivalTime || offer.stops !== segments.length - 1) {
                 recordRejection(rejections, 'segment schedule mismatch');
                 return [];
             }
+            diagnosticStages.matchingSegmentSchedule += 1;
             if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(offer.departureTime) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(offer.arrivalTime)) {
                 recordRejection(rejections, 'invalid schedule');
                 return [];
             }
+            diagnosticStages.validScheduleFormat += 1;
             if (!/^\d+h\s+\d{2}m$/i.test(offer.duration) || !Number.isInteger(offer.stops) || offer.stops < 0) {
                 recordRejection(rejections, 'invalid schedule');
                 return [];
             }
+            diagnosticStages.validDurationAndStops += 1;
             if (!Number.isFinite(offer.price) || offer.price <= 0 || !offer.currency.trim()) {
                 recordRejection(rejections, 'invalid fare');
                 return [];
             }
+            diagnosticStages.validFare += 1;
             return [{
                     ...offer,
                     airline: [...new Set(segments.map((segment) => verifiedIndianAirline(segment.airline, segment.airlineCode)?.name ?? ''))].filter(Boolean).join(' / '),
@@ -362,7 +380,9 @@ export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffel
         for (const [reason, count] of Object.entries(rejections)) {
             combinedRejections[reason] = (combinedRejections[reason] ?? 0) + count;
         }
-        const searchOffers = timestampSearchOffers(deduplicateOffers(verifiedOffers));
+        const uniqueOffers = deduplicateOffers(verifiedOffers);
+        const duplicateCount = verifiedOffers.length - uniqueOffers.length;
+        const searchOffers = timestampSearchOffers(uniqueOffers);
         const countByCarrier = (offers) => {
             const counts = {};
             for (const offer of offers) {
@@ -379,27 +399,21 @@ export async function searchFlightsFromDuffel(input, searchDuffel = searchDuffel
         console.info(`[Duffel] VERIFIED OFFERS BY CARRIER: ${countByCarrier(searchOffers)}`);
         console.info(`[Duffel] Rejected offers: ${providerRejectedOffers + localRejectedOffers}`);
         console.info(`[Duffel] Verified offers: ${searchOffers.length}`);
-        if (!searchOffers.length)
-            console.info('[LIVE DATA] No verified Duffel offers available');
         if (searchOffers.length) {
             void Promise.resolve()
                 .then(() => publishFlightOffers(searchOffers))
                 .catch((error) => console.warn('Unable to publish verified flight search results', error));
         }
+        console.info(`[Flight Search] FILTER STAGES ${JSON.stringify({ ...diagnosticStages, passedAllValidation: diagnosticStages.validFare, duplicatesRemoved: duplicateCount, finalVerified: searchOffers.length })}`);
+        console.info(`[Flight Search] BACKEND REJECTIONS ${JSON.stringify(rejections)}`);
         console.info(`[Flight Search] Final merged result count=${searchOffers.length} source=duffel`);
         return searchOffers.length
             ? { offers: searchOffers, status: 'live_success' }
-            : { offers: [], status: 'no_results', message: 'No verified flights available for this search.' };
+            : { offers: [], status: 'no_results', message: 'No flights available for this search.' };
     }
     catch (error) {
         console.warn(`[Duffel] FAILED: ${error instanceof Error ? error.message : String(error)}`);
-        console.info('[Duffel] Raw offers: 0');
-        console.info('[Duffel] Valid offers before airline filtering: 0');
-        console.info('[Duffel] Rejected offers: 0');
-        console.info('[Duffel] Verified offers: 0');
-        console.info('[LIVE DATA] No verified Duffel offers available');
-        console.info('[Flight Search] Final merged result count=0 source=duffel');
-        return { offers: [], status: 'no_results', message: 'No verified flights available for this search.' };
+        return { offers: [], status: 'duffel_error_no_fallback', message: 'Live flight data is temporarily unavailable. Please try again.' };
     }
 }
 export async function searchFlights(input) {

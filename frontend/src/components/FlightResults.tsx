@@ -44,6 +44,14 @@ function getOfferAirlines(offer: FlightOffer) {
   return [...new Map(airlines.map((airline) => [airline.airlineCode, airline])).values()]
 }
 
+const PRESENTATION_AIRLINES = ['Air India', 'IndiGo', 'Akasa Air', 'SpiceJet', 'Air India Express'] as const
+
+function presentationAirline(index: number) {
+  const airline = PRESENTATION_AIRLINES[index % PRESENTATION_AIRLINES.length]!
+  const brand = getAirlineBrand(airline)!
+  return { airline, airlineCode: brand.code }
+}
+
 export function FlightResults({ result, loading = false, theme }: FlightResultsProps) {
   if (loading) {
     return <LoadingState theme={theme} />
@@ -77,8 +85,12 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
     )
   }
 
+  const presentationMode = new URLSearchParams(window.location.search).get('presentationDemo') === '1'
+  const displayedAirlines = (offer: FlightOffer, index: number) => presentationMode ? [presentationAirline(index)] : getOfferAirlines(offer)
   const cheapest = result.cheapestOffer
-  const cheapestPrimaryAirline = cheapest ? getOfferAirlines(cheapest)[0] : undefined
+  const cheapestIndex = cheapest ? result.offers.indexOf(cheapest) : -1
+  const cheapestAirlines = cheapest ? displayedAirlines(cheapest, Math.max(0, cheapestIndex)) : []
+  const cheapestPrimaryAirline = cheapestAirlines[0]
   const cheapestBrand = cheapestPrimaryAirline ? getAirlineBrandByCode(cheapestPrimaryAirline.airlineCode) ?? getAirlineBrand(cheapestPrimaryAirline.airline) : undefined
   const latestCollectedAt = result.offers.reduce((latest, offer) => {
     const collectedAt = new Date(offer.collectedAt).getTime()
@@ -95,9 +107,9 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
         timeStyle: 'short',
       }).format(new Date(latestCollectedAt))
     : 'Live check pending'
-  const availableAirlines = [...new Map(
-    result.offers.flatMap(getOfferAirlines).map((airline) => [airline.airlineCode || airline.airline, airline]),
-  ).values()]
+  const availableAirlines = presentationMode
+    ? PRESENTATION_AIRLINES.map((_, index) => presentationAirline(index))
+    : [...new Map(result.offers.flatMap(getOfferAirlines).map((airline) => [airline.airlineCode || airline.airline, airline])).values()]
 
   return (
     <section id="results" className="mx-auto w-full max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
@@ -115,6 +127,11 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
             }`}
           >
             {hideProviderBrand(result.message)}
+          </div>
+        ) : null}
+        {presentationMode ? (
+          <div className={`rounded-2xl border px-4 py-3 text-sm font-semibold ${theme === 'dark' ? 'border-violet-300/20 bg-violet-300/10 text-violet-100' : 'border-violet-200 bg-violet-50 text-violet-900'}`}>
+            Presentation demo · airline names and logos are illustrative; returned flight details and fares are unchanged.
           </div>
         ) : null}
         <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
@@ -239,7 +256,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                     Cheapest airline
                   </p>
                   <h3 className={`mt-1 break-words text-2xl font-bold ${theme === 'dark' ? 'text-white' : 'text-slate-950'}`}>
-                    {cheapest.airline}
+                    {cheapestPrimaryAirline?.airline ?? cheapest.airline}
                   </h3>
                   <p className={`mt-1 text-sm font-semibold ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>
                     {cheapest.origin} → {cheapest.destination}
@@ -271,7 +288,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                   </div>
                   <div className="mt-3">
                     <div className="flex flex-wrap gap-2">
-                      {getOfferAirlines(cheapest).map((airline) => {
+                      {cheapestAirlines.map((airline) => {
                         const brand = getAirlineBrandByCode(airline.airlineCode) ?? getAirlineBrand(airline.airline)
                         return <AirlineMark key={airline.airlineCode} airline={airline.airline} code={airline.airlineCode} logoUrl={brand?.logoUrl} compact />
                       })}
@@ -302,6 +319,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
               offer={offer}
               theme={theme}
               isCheapest={index === 0}
+              airlines={displayedAirlines(offer, index)}
             />
           ))}
         </div>
@@ -331,6 +349,7 @@ export function FlightResults({ result, loading = false, theme }: FlightResultsP
                     offer={offer}
                     theme={theme}
                     isCheapest={isCheapest}
+                    airlines={displayedAirlines(offer, index)}
                   />
                 )
               })}
@@ -346,12 +365,14 @@ function FlightOfferCard({
   offer,
   theme,
   isCheapest,
+  airlines,
 }: {
   offer: FlightOffer
   theme: 'dark' | 'light'
   isCheapest: boolean
+  airlines: ReturnType<typeof presentationAirline>[] | ReturnType<typeof getOfferAirlines>
 }) {
-  const offerAirlines = getOfferAirlines(offer)
+  const offerAirlines = airlines
 
   return (
     <article
@@ -411,12 +432,14 @@ function FlightRow({
   offer,
   theme,
   isCheapest,
+  airlines,
 }: {
   offer: FlightOffer
   theme: 'dark' | 'light'
   isCheapest: boolean
+  airlines: ReturnType<typeof presentationAirline>[] | ReturnType<typeof getOfferAirlines>
 }) {
-  const offerAirlines = getOfferAirlines(offer)
+  const offerAirlines = airlines
 
   return (
     <tr

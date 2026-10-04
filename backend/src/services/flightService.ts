@@ -14,8 +14,6 @@ const INDIAN_CARRIERS: Array<{ name: string; code: string; aliases: readonly str
   { name: 'Air India Express', code: 'IX', aliases: ['airindiaexpress', 'airindiaexpresslimited'] },
   { name: 'Akasa Air', code: 'QP', aliases: ['akasa', 'akasaair', 'akasaairlines'] },
   { name: 'SpiceJet', code: 'SG', aliases: ['spicejet', 'spicejetlimited'] },
-  { name: 'Alliance Air', code: '9I', aliases: ['allianceair', 'allianceairlimited'] },
-  { name: 'Star Air', code: 'S5', aliases: ['starair', 'starairlines'] },
 ]
 
 function verifiedIndianAirline(name: string, code: string) {
@@ -76,27 +74,16 @@ function validateRequest(input: FlightSearchRequest) {
 
 export function deduplicateOffers(offers: NormalizedFlightOffer[]) {
   const unique = new Map<string, NormalizedFlightOffer>()
-  const sourcePriority = { airline: 3, duffel: 2, ota: 1, aggregated: 0, demo: 0 } as const
   for (const offer of offers) {
-    const identity = [
-      offer.airlineCode || offer.airline,
-      offer.flightNumber.replace(/[^a-z0-9]/gi, ''),
-      offer.origin,
-      offer.destination,
-      offer.departureDate,
-      offer.departureTime,
-      offer.arrivalTime,
-      offer.duration,
-      offer.stops,
-    ].join('|').toUpperCase()
+    const identity = offer.segments?.length
+      ? offer.segments.map((segment) => [segment.airlineCode, segment.flightNumber, segment.operatingAirlineCode ?? '', segment.operatingAirline ?? '', segment.origin, segment.destination, segment.departureDate, segment.departureTime, segment.arrivalDate, segment.arrivalTime].join(':')).join('~').toUpperCase()
+      : [offer.airlineCode || offer.airline, offer.flightNumber.replace(/[^a-z0-9]/gi, ''), offer.origin, offer.destination, offer.departureDate, offer.departureTime, offer.arrivalTime].join('|').toUpperCase()
     const current = unique.get(identity)
-    const priority = sourcePriority[offer.sourceType]
-    const currentPriority = current ? sourcePriority[current.sourceType] : -1
-    if (!current || priority > currentPriority || (priority === currentPriority && comparablePriceInINR(offer) < comparablePriceInINR(current)) || (priority === currentPriority && comparablePriceInINR(offer) === comparablePriceInINR(current) && offer.confidence > current.confidence)) {
+    if (!current || comparablePriceInINR(offer) < comparablePriceInINR(current)) {
       unique.set(identity, offer)
     }
   }
-  return [...unique.values()].sort((left, right) => left.departureTime.localeCompare(right.departureTime) || comparablePriceInINR(left) - comparablePriceInINR(right))
+  return [...unique.values()].sort((left, right) => comparablePriceInINR(left) - comparablePriceInINR(right))
 }
 
 export function timestampSearchOffers(offers: NormalizedFlightOffer[], collectedAt = new Date().toISOString()) {

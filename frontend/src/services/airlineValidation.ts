@@ -1,7 +1,7 @@
 import type { FlightOffer } from '@/types/flight'
 import type { FareSnapshot } from '@/types/fare'
 
-const ALLOWED_AIRLINES = new Set(['IndiGo', 'Air India', 'Air India Express', 'Akasa Air', 'SpiceJet', 'Alliance Air', 'Star Air'])
+const ALLOWED_AIRLINES = new Set(['IndiGo', 'Air India', 'Air India Express', 'Akasa Air', 'SpiceJet'])
 
 function normalizeAirlineName(name: string, code: string) {
   const normalizedName = name.trim().toLowerCase().replace(/[^a-z]/g, '')
@@ -14,8 +14,6 @@ function normalizeAirlineName(name: string, code: string) {
       IX: 'Air India Express',
       QP: 'Akasa Air',
       SG: 'SpiceJet',
-      '9I': 'Alliance Air',
-      S5: 'Star Air',
     }
     return airlineByCode[normalizedCode] ?? ''
   }
@@ -25,8 +23,6 @@ function normalizeAirlineName(name: string, code: string) {
   if (normalizedName === 'airindia' || normalizedName === 'airindianational') return 'Air India'
   if (normalizedName === 'akasa' || normalizedName === 'akasaair') return 'Akasa Air'
   if (normalizedName === 'spicejet' || normalizedName === 'spicejetlimited') return 'SpiceJet'
-  if (normalizedName === 'allianceair' || normalizedName === 'allianceairlimited') return 'Alliance Air'
-  if (normalizedName === 'starair' || normalizedName === 'starairlines') return 'Star Air'
   return ''
 }
 

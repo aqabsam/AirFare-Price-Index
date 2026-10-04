@@ -1,24 +1,12 @@
 import { airportDisplayLabel, findAirport } from '@/data/airports'
 import type { FlightOffer, FlightSearchInput, FlightSearchResult, FlightSearchStatus } from '@/types/flight'
 import { convertFareToINR } from '@/services/fareCalculations'
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
+import { buildApiUrl } from '@/services/apiUrl'
 const SEARCH_TIMEOUT_MS = 300_000
 const inFlightRequests = new Map<string, Promise<FlightSearchResult>>()
 
 function searchRequestKey(input: FlightSearchInput) {
   return `${String(input.origin || '').trim().toLowerCase()}|${String(input.destination || '').trim().toLowerCase()}|${String(input.travelDate || '').trim()}|${input.adults || 1}`
-}
-
-function buildApiUrl(path: string) {
-  if (import.meta.env.DEV || !API_BASE_URL) {
-    return path
-  }
-
-  if (API_BASE_URL.startsWith('http://localhost') || API_BASE_URL.startsWith('http://127.0.0.1')) {
-    return path
-  }
-
-  return `${API_BASE_URL}${path}`
 }
 
 // The backend returns stored fare snapshots in their source currency. We normalize

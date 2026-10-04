@@ -13,8 +13,6 @@ const canonicalAirlineNames = {
     IX: 'Air India Express',
     QP: 'Akasa Air',
     SG: 'SpiceJet',
-    '9I': 'Alliance Air',
-    S5: 'Star Air',
 };
 function rejectOffer(diagnostics, reason) {
     if (diagnostics) {
@@ -126,7 +124,7 @@ function logRawDuffelOffers(offers) {
             const operatingCarrier = rawCarrierLabel(segment.operating_carrier);
             marketingCounts[marketingCarrier] = (marketingCounts[marketingCarrier] ?? 0) + 1;
             operatingCounts[operatingCarrier] = (operatingCounts[operatingCarrier] ?? 0) + 1;
-            console.info(`[Duffel] RAW OFFER #${offerIndex + 1} SEGMENT #${segmentIndex + 1} marketing=${marketingCarrier} operating=${operatingCarrier} marketing_flight=${segment.marketing_carrier_flight_number ?? 'missing'} operating_flight=${segment.operating_carrier_flight_number ?? 'missing'} flight_number=${segment.flight_number ?? 'missing'} origin=${segment.origin?.iata_code ?? 'missing'} destination=${segment.destination?.iata_code ?? 'missing'} departure=${segment.departing_at ?? 'missing'} arrival=${segment.arriving_at ?? 'missing'} total=${offer.total_amount ?? 'missing'} ${offer.total_currency ?? ''}`);
+            console.info(`[Duffel] RAW OFFER #${offerIndex + 1} SEGMENT #${segmentIndex + 1} live_mode=${offer.live_mode ?? 'missing'} marketing=${marketingCarrier} operating=${operatingCarrier} marketing_flight=${segment.marketing_carrier_flight_number ?? 'missing'} operating_flight=${segment.operating_carrier_flight_number ?? 'missing'} flight_number=${segment.flight_number ?? 'missing'} origin=${segment.origin?.iata_code ?? 'missing'} destination=${segment.destination?.iata_code ?? 'missing'} departure=${segment.departing_at ?? 'missing'} arrival=${segment.arriving_at ?? 'missing'} total=${offer.total_amount ?? 'missing'} ${offer.total_currency ?? ''}`);
         });
     });
     const formatCounts = (counts) => Object.entries(counts).map(([carrier, count]) => `${carrier}=${count}`).join(', ') || 'none';
@@ -143,19 +141,30 @@ export function normalizeDuffelOffer(offer, requestedRoute, diagnostics) {
     for (const segment of segments) {
         const operatingCarrier = segment.operating_carrier;
         const marketingCarrier = segment.marketing_carrier;
-        const operatingHasCode = Boolean(cleanAirlineCode(operatingCarrier?.iata_code));
-        const actualCarrier = operatingHasCode ? operatingCarrier : marketingCarrier;
-        const airlineCode = rawCarrierCode(actualCarrier?.iata_code);
-        const airline = canonicalAirlineNames[airlineCode] ?? actualCarrier?.name?.trim() ?? '';
-        if (!airline || !airlineCode || !canonicalAirlineNames[airlineCode] || isProviderBrandName(airline) || (actualCarrier?.country_code && actualCarrier.country_code.trim().toUpperCase() !== 'IN')) {
+        // Duffel exposes both the commercial (marketing) flight and the carrier
+        // physically operating it. Prefer the verified marketing identity with
+        // its matching flight number; use the operating identity only when the
+        // marketing carrier is not one of the supported Indian airlines.
+        const carrierCandidates = [
+            { carrier: marketingCarrier, numbers: [segment.marketing_carrier_flight_number, segment.flight_number] },
+            { carrier: operatingCarrier, numbers: [segment.operating_carrier_flight_number, segment.flight_number] },
+        ];
+        const selected = carrierCandidates.map(({ carrier, numbers }) => {
+            const code = rawCarrierCode(carrier?.iata_code);
+            const country = carrier?.country_code?.trim().toUpperCase();
+            const name = canonicalAirlineNames[code] ?? carrier?.name?.trim() ?? '';
+            const flightNumber = numbers.map((candidate) => normalizeFlightNumber(code, candidate))
+                .find((candidate) => candidate !== null && candidate.startsWith(code));
+            return { carrier, code, country, name, flightNumber };
+        }).find((candidate) => Boolean(candidate.code && canonicalAirlineNames[candidate.code] && candidate.flightNumber && (!candidate.country || candidate.country === 'IN')));
+        const actualCarrier = selected?.carrier;
+        const airlineCode = selected?.code ?? '';
+        const airline = selected?.name ?? '';
+        if (!airline || !airlineCode || isProviderBrandName(airline) || (actualCarrier?.country_code && actualCarrier.country_code.trim().toUpperCase() !== 'IN')) {
             return rejectOffer(diagnostics, 'invalid_carrier');
         }
-        const rawFlightNumbers = operatingHasCode
-            ? [segment.operating_carrier_flight_number, segment.flight_number]
-            : [segment.marketing_carrier_flight_number, segment.flight_number];
-        const flightNumber = rawFlightNumbers
-            .map((candidate) => normalizeFlightNumber(airlineCode, candidate))
-            .find((candidate) => candidate !== null && candidate.startsWith(airlineCode));
+        const flightNumber = selected?.flightNumber;
+        const flightNumberCarrierCode = selected?.code ?? '';
         if (!flightNumber)
             return rejectOffer(diagnostics, 'invalid_flight_number');
         const origin = segment.origin?.iata_code?.trim().toUpperCase() ?? '';
@@ -186,6 +195,7 @@ export function normalizeDuffelOffer(offer, requestedRoute, diagnostics) {
             marketingAirlineCode: cleanAirlineCode(marketingCarrier?.iata_code) || null,
             operatingAirline: operatingCarrier?.name?.trim() || null,
             operatingAirlineCode: cleanAirlineCode(operatingCarrier?.iata_code) || null,
+            flightNumberCarrierCode,
             carrierCountryCode: actualCarrier?.country_code?.trim().toUpperCase() || null,
             logoUrl: actualCarrier?.logo_symbol_url?.trim() || actualCarrier?.logo_lockup_url?.trim() || null,
             flightNumber,
@@ -288,6 +298,20 @@ export async function searchDuffelOffers(input, onRawOfferCount, onOfferValidati
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs + 1000);
     try {
+        const requestPayload = {
+            data: {
+                cabin_class: 'economy',
+                slices: [
+                    {
+                        origin: input.origin,
+                        destination: input.destination,
+                        departure_date: input.departureDate,
+                    },
+                ],
+                passengers: Array.from({ length: input.adults }, () => ({ type: 'adult' })),
+            },
+        };
+        console.info(`[Duffel] SAFE REQUEST PAYLOAD ${JSON.stringify(requestPayload)}`);
         const response = await fetch(`${baseUrl}/air/offer_requests?supplier_timeout=${timeoutMs}`, {
             method: 'POST',
             headers: {
@@ -296,21 +320,10 @@ export async function searchDuffelOffers(input, onRawOfferCount, onOfferValidati
                 'Duffel-Version': 'v2',
                 Authorization: `Bearer ${apiKey}`,
             },
-            body: JSON.stringify({
-                data: {
-                    cabin_class: 'economy',
-                    slices: [
-                        {
-                            origin: input.origin,
-                            destination: input.destination,
-                            departure_date: input.departureDate,
-                        },
-                    ],
-                    passengers: Array.from({ length: input.adults }, () => ({ type: 'adult' })),
-                },
-            }),
+            body: JSON.stringify(requestPayload),
             signal: controller.signal,
         });
+        console.info(`[Duffel] HTTP RESPONSE STATUS ${response.status}`);
         const payload = (await response.json().catch(() => null));
         if (!response.ok) {
             const firstError = payload?.errors?.[0];

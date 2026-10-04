@@ -50,15 +50,14 @@ export function SearchPage({ theme }: SearchPageProps) {
       await executeSearch(query)
       const originCode = findAirport(query.origin)?.code ?? query.origin
       const destinationCode = findAirport(query.destination)?.code ?? query.destination
-      setSearchParams(
-        {
-          origin: originCode,
-          destination: destinationCode,
-          departureDate: query.travelDate,
-          adults: String(query.adults),
-        },
-        { replace: true },
-      )
+      const nextSearchParams: Record<string, string> = {
+        origin: originCode,
+        destination: destinationCode,
+        departureDate: query.travelDate,
+        adults: String(query.adults),
+      }
+      if (searchParams.get('presentationDemo') === '1') nextSearchParams.presentationDemo = '1'
+      setSearchParams(nextSearchParams, { replace: true })
     } catch {
       // The shared search state exposes the request error to every section.
     }

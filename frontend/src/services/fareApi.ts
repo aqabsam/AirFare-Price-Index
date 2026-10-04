@@ -15,17 +15,8 @@ import type {
   FareHistoryResponse,
   FareIndexHistoryResponse,
 } from '@/types/fare'
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
+import { buildApiUrl } from '@/services/apiUrl'
 const API_TIMEOUT_MS = 8000
-
-function buildApiUrl(path: string) {
-  if (!API_BASE_URL) {
-    return path
-  }
-
-  return `${API_BASE_URL}${path}`
-}
 
 async function getJson<T>(path: string): Promise<T> {
   let response: Response

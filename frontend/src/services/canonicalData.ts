@@ -1,6 +1,5 @@
 import type { FlightOffer } from '@/types/flight'
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim().replace(/\/$/, '') ?? ''
+import { buildApiUrl } from '@/services/apiUrl'
 const API_TIMEOUT_MS = 8000
 export type CanonicalDataset = {
   offers: FlightOffer[]
@@ -13,7 +12,7 @@ export async function fetchCanonicalDataset(): Promise<CanonicalDataset> {
   const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS)
   let response: Response
   try {
-    response = await fetch(`${API_BASE_URL}/api/data/canonical`, { signal: controller.signal })
+    response = await fetch(buildApiUrl('/api/data/canonical'), { signal: controller.signal })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new Error('Canonical fare data request timed out.')

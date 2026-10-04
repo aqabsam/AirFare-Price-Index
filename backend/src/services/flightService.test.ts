@@ -46,15 +46,13 @@ test('detects test-mode provider credentials so test fares are not included in l
   }
 })
 
-test('retains verified offers from every supported Indian airline when sources return them', () => {
+test('retains verified offers from each requested Indian airline when sources return them', () => {
   const airlineOffers = [
     ['IndiGo', '6E', '6E1234'],
     ['Air India', 'AI', 'AI1234'],
     ['Air India Express', 'IX', 'IX1234'],
     ['Akasa Air', 'QP', 'QP1234'],
     ['SpiceJet', 'SG', 'SG1234'],
-    ['Alliance Air', '9I', '9I1234'],
-    ['Star Air', 'S5', 'S51234'],
   ].map(([airline, airlineCode, flightNumber], index) => canonicalizeScrapedOffer({
     airline,
     airlineCode,
@@ -76,7 +74,7 @@ test('retains verified offers from every supported Indian airline when sources r
 
   const results = deduplicateOffers(airlineOffers)
 
-  assert.deepEqual(results.map((offer) => offer.airline), ['IndiGo', 'Air India', 'Air India Express', 'Akasa Air', 'SpiceJet', 'Alliance Air', 'Star Air'])
+  assert.deepEqual(results.map((offer) => offer.airline), ['IndiGo', 'Air India', 'Air India Express', 'Akasa Air', 'SpiceJet'])
 })
 
 test('rejects a flight number whose prefix conflicts with the verified airline', () => {
